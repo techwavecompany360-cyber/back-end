@@ -19,6 +19,21 @@ app.use(
   }),
 );
 
+// Ensure preflight OPTIONS requests are handled for all routes
+app.options('*', cors({ origin: true, credentials: true }));
+
+// Fallback: ensure CORS headers are present on all responses.
+// Useful when a reverse proxy strips or handles headers inconsistently.
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,Accept');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json());
 app.use(morgan("dev"));
 
