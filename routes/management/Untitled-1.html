@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Room Availability Calendar</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f3f4f6;
+        margin: 0;
+        padding: 16px;
+      }
+
+      .container {
+        max-width: 420px;
+        margin: auto;
+      }
+
+      .room-card {
+        background: white;
+        border-radius: 14px;
+        padding: 14px;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+        margin-bottom: 12px;
+      }
+
+      .room-header {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .room-header img {
+        width: 90px;
+        height: 90px;
+        border-radius: 12px;
+        object-fit: cover;
+      }
+
+      .room-header h2 {
+        margin: 0;
+        font-size: 17px;
+      }
+
+      .price {
+        font-weight: bold;
+        margin-top: 4px;
+      }
+
+      .calendar {
+        margin-top: 12px;
+      }
+
+      .calendar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+
+      .calendar-header button {
+        background: #2563eb;
+        color: white;
+        border: none;
+        padding: 6px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .month {
+        font-weight: bold;
+        font-size: 14px;
+      }
+
+      .weekdays,
+      .days {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        text-align: center;
+        gap: 4px;
+      }
+
+      .weekdays div {
+        font-size: 11px;
+        color: #666;
+      }
+
+      .day {
+        padding: 10px 0;
+        border-radius: 8px;
+        font-size: 13px;
+        cursor: pointer;
+        background: #f9fafb;
+      }
+
+      .day:hover {
+        background: #e5e7eb;
+      }
+
+      .disabled {
+        background: #ef4444;
+        color: white;
+        cursor: not-allowed;
+      }
+
+      .selected {
+        background: #2563eb;
+        color: white;
+      }
+
+      .in-range {
+        background: #93c5fd;
+        color: #1e3a8a;
+      }
+
+      .summary {
+        margin-top: 10px;
+        font-size: 13px;
+        color: #374151;
+      }
+
+      .book-btn {
+        margin-top: 10px;
+        width: 100%;
+        padding: 10px;
+        background: #16a34a;
+        color: white;
+        border: none;
+        border-radius: 10px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+
+      .book-btn:disabled {
+        background: #9ca3af;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <!-- Room Info -->
+      <div class="room-card">
+        <div class="room-header">
+          <img src="https://picsum.photos/200/200?room" />
+          <div>
+            <h2>Deluxe Room</h2>
+            <div>Sleeps 2 • King Bed</div>
+            <div class="price">$80 / night</div>
+          </div>
+        </div>
+
+        <!-- Calendar -->
+        <div class="calendar">
+          <div class="calendar-header">
+            <button onclick="prevMonth()">◀</button>
+            <div class="month" id="monthLabel"></div>
+            <button onclick="nextMonth()">▶</button>
+          </div>
+
+          <div class="weekdays">
+            <div>Sun</div>
+            <div>Mon</div>
+            <div>Tue</div>
+            <div>Wed</div>
+            <div>Thu</div>
+            <div>Fri</div>
+            <div>Sat</div>
+          </div>
+
+          <div class="days" id="calendarDays"></div>
+        </div>
+
+        <!-- Summary -->
+        <div class="summary" id="summaryText">
+          Select check-in and check-out dates
+        </div>
+
+        <!-- Book -->
+        <button class="book-btn" id="bookBtn" disabled onclick="bookRoom()">
+          Book This Room
+        </button>
+      </div>
+    </div>
+
+    <script>
+      const pricePerNight = 80;
+
+      // Example booked dates (yyyy-mm-dd)
+      const bookedDates = [
+        "2026-02-12",
+        "2026-02-13",
+        "2026-02-18",
+        "2026-02-19",
+        "2026-02-25",
+      ];
+
+      let currentMonth = new Date().getMonth();
+      let currentYear = new Date().getFullYear();
+      let startDate = null;
+      let endDate = null;
+
+      const monthLabel = document.getElementById("monthLabel");
+      const calendarDays = document.getElementById("calendarDays");
+      const summaryText = document.getElementById("summaryText");
+      const bookBtn = document.getElementById("bookBtn");
+
+      function formatDate(date) {
+        return date.toISOString().split("T")[0];
+      }
+
+      function isBooked(dateStr) {
+        return bookedDates.includes(dateStr);
+      }
+
+      function renderCalendar() {
+        calendarDays.innerHTML = "";
+
+        const firstDay = new Date(currentYear, currentMonth, 1).getDay();
+        const daysInMonth = new Date(
+          currentYear,
+          currentMonth + 1,
+          0,
+        ).getDate();
+
+        const monthNames = [
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December",
+        ];
+
+        monthLabel.textContent = `${monthNames[currentMonth]} ${currentYear}`;
+
+        for (let i = 0; i < firstDay; i++) {
+          calendarDays.appendChild(document.createElement("div"));
+        }
+
+        for (let day = 1; day <= daysInMonth; day++) {
+          const date = new Date(currentYear, currentMonth, day);
+          const dateStr = formatDate(date);
+
+          const div = document.createElement("div");
+          div.className = "day";
+          div.textContent = day;
+
+          if (isBooked(dateStr)) {
+            div.classList.add("disabled");
+          } else {
+            div.onclick = () => selectDate(date, div);
+          }
+
+          calendarDays.appendChild(div);
+        }
+
+        updateUI();
+      }
+
+      function selectDate(date, el) {
+        if (!startDate || (startDate && endDate)) {
+          startDate = date;
+          endDate = null;
+        } else if (date < startDate) {
+          startDate = date;
+        } else {
+          endDate = date;
+        }
+        updateUI();
+      }
+
+      function updateUI() {
+        const dayElements = document.querySelectorAll(".day");
+
+        dayElements.forEach((el) => {
+          el.classList.remove("selected", "in-range");
+          const dayNum = parseInt(el.textContent);
+          if (isNaN(dayNum)) return;
+
+          const d = new Date(currentYear, currentMonth, dayNum);
+
+          if (startDate && formatDate(d) === formatDate(startDate)) {
+            el.classList.add("selected");
+          }
+
+          if (endDate && formatDate(d) === formatDate(endDate)) {
+            el.classList.add("selected");
+          }
+
+          if (startDate && endDate && d > startDate && d < endDate) {
+            el.classList.add("in-range");
+          }
+        });
+
+        if (startDate && endDate) {
+          const nights = Math.ceil(
+            (endDate - startDate) / (1000 * 60 * 60 * 24),
+          );
+          const total = nights * pricePerNight;
+          summaryText.textContent = `${nights} nights • $${total}`;
+          bookBtn.disabled = false;
+        } else {
+          summaryText.textContent = "Select check-in and check-out dates";
+          bookBtn.disabled = true;
+        }
+      }
+
+      function prevMonth() {
+        currentMonth--;
+        if (currentMonth < 0) {
+          currentMonth = 11;
+          currentYear--;
+        }
+        renderCalendar();
+      }
+
+      function nextMonth() {
+        currentMonth++;
+        if (currentMonth > 11) {
+          currentMonth = 0;
+          currentYear++;
+        }
+        renderCalendar();
+      }
+
+      function bookRoom() {
+        alert(
+          `Room booked from ${formatDate(startDate)} to ${formatDate(endDate)}`,
+        );
+      }
+
+      renderCalendar();
+    </script>
+  </body>
+</html>
