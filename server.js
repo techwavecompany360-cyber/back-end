@@ -19,9 +19,6 @@ app.use(
   }),
 );
 
-// Ensure preflight OPTIONS requests are handled for all routes
-app.options(/.*/, cors({ origin: true, credentials: true }));
-
 app.use(express.json());
 app.use(morgan("dev"));
 
