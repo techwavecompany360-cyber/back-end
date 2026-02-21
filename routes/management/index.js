@@ -84,6 +84,11 @@ router.post(
       const userData = req.body;
       const files = req.files;
 
+      // Debug: log what we're receiving
+      console.log("Received headers:", req.headers["content-type"]);
+      console.log("req.body keys:", Object.keys(userData || {}));
+      console.log("req.files:", files);
+
       // Validate required fields
       const requiredFields = [
         "name",
