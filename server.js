@@ -39,6 +39,7 @@ app.use(
           "'self'",
           "http://localhost:5173",
           "https://rem360.co.tz",
+          "https://admin.rem360.co.tz/",
         ],
       },
     },
