@@ -8,21 +8,11 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 // Middleware
-const allowedOrigins = [
-  "https://admin.rem360.co.tz",
-  "https://rem360.co.tz",
-  "http://localhost:5173",
-];
-
 app.use(
   cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.indexOf(origin) !== -1) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"));
-    },
+    // reflect request origin — allows any front-end URL while still
+    // supporting credentials by echoing the incoming Origin header
+    origin: true,
     methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
