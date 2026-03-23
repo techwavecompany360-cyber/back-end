@@ -41,7 +41,15 @@ router.post("/management/profile", async (req, res, next) => {
     next(err);
   }
 });
-
+router.get("/management/owners", async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("management");
+    const notes = await col.find({ owner: true }).toArray();
+    res.json(notes);
+  } catch (err) {
+    next(err);
+  }
+});
 router.get("/management", async (req, res, next) => {
   try {
     const col = await mongo.getCollection("management");
@@ -106,6 +114,7 @@ router.post("/login", async (req, res, next) => {
     console.log(admin);
     if (!admin) return res.status(401).json({ error: "invalid credentials" });
     const ok = await bcrypt.compare(password, admin.passwordHash);
+    console.log("Password match:", ok);
     if (!ok) return res.status(401).json({ error: "invalid credentials" });
     const token = sign({ email: admin.email, id: admin.id, role: "admin" });
     res.json({ token });
@@ -130,7 +139,7 @@ router.post("/accomodations/approve", async (req, res, next) => {
     const col = await mongo.getCollection("accomodations");
     const result = await col.updateOne(
       { _id: new ObjectId(accomodationId) },
-      { $set: { adminApproval: true, status: "approved" } },
+      { $set: { adminApproval: true, rejected: false, status: "approved" } },
     );
     res.status(200).json({
       message: "Accommodation approved successfully",
@@ -140,7 +149,111 @@ router.post("/accomodations/approve", async (req, res, next) => {
     next(err);
   }
 });
+router.post("/accomodations/block", async (req, res, next) => {
+  try {
+    const { accomodationId } = req.body;
+    console.log("Approving accommodation with ID:", accomodationId);
+    const col = await mongo.getCollection("accomodations");
+    const result = await col.updateOne(
+      { _id: new ObjectId(accomodationId) },
+      { $set: { blocked: true } },
+    );
+    res.status(200).json({
+      message: "Accommodation Currentl Blocked",
+      result,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
+router.post("/accomodations/unblock", async (req, res, next) => {
+  try {
+    const { accomodationId } = req.body;
+    console.log("Approving accommodation with ID:", accomodationId);
+    const col = await mongo.getCollection("accomodations");
+    const result = await col.updateOne(
+      { _id: new ObjectId(accomodationId) },
+      { $set: { blocked: false } },
+    );
+    res.status(200).json({
+      message: "Accommodation Currentl Blocked",
+      result,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/room/approve", async (req, res, next) => {
+  try {
+    const { roomId } = req.body;
+    console.log("Approving room with ID:", roomId);
+    const col = await mongo.getCollection("rooms");
+    const result = await col.updateOne(
+      { _id: new ObjectId(roomId) },
+      { $set: { adminApproval: true, rejected: false, status: "approved" } },
+    );
+    res.status(200).json({
+      message: "Room approved successfully",
+      result,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+router.post("/room/reject", async (req, res, next) => {
+  try {
+    const { roomId } = req.body;
+    console.log("Approving room with ID:", roomId);
+    const col = await mongo.getCollection("rooms");
+    const result = await col.updateOne(
+      { _id: new ObjectId(roomId) },
+      { $set: { rejected: true, status: "rejected" } },
+    );
+    res.status(200).json({
+      message: "Room rejected successfully",
+      result,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/room/block", async (req, res, next) => {
+  try {
+    const { roomId } = req.body;
+    console.log("Approving room with ID:", roomId);
+    const col = await mongo.getCollection("rooms");
+    const result = await col.updateOne(
+      { _id: new ObjectId(roomId) },
+      { $set: { blocked: true } },
+    );
+    res.status(200).json({
+      message: "Room blocked successfully",
+      result,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+router.post("/room/unblock", async (req, res, next) => {
+  try {
+    const { roomId } = req.body;
+    console.log("Unblocking room with ID:", roomId);
+    const col = await mongo.getCollection("rooms");
+    const result = await col.updateOne(
+      { _id: new ObjectId(roomId) },
+      { $set: { blocked: false } },
+    );
+    res.status(200).json({
+      message: "Room unblocked successfully",
+      result,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 // Protected POST example
 router.post("/protected", authMiddleware, async (req, res, next) => {
   try {

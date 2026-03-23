@@ -10,6 +10,7 @@ const { body, validationResult, query } = require("express-validator");
 const users = require("../../lib/users");
 const rateLimit = require("express-rate-limit");
 const { ObjectId } = require("mongodb");
+const { Console } = require("console");
 
 // Ensure indexes on startup for users collection
 users.ensureIndexes().catch(() => {});
@@ -209,7 +210,7 @@ router.post(
         //   mobilePhone: userData.mobilePhone,
         // }),
         role: "Manager",
-        approved: false,
+        adminApproval: false,
         approvedState: "Pending",
         owner: true,
         reference,
@@ -283,6 +284,9 @@ router.post("/accomodations", async (req, res, next) => {
     const payload = req.body;
     const accomodationData = {
       ...payload,
+      adminApproval: false,
+      rejected: false,
+      blocked: false,
       createdAt: new Date(),
     };
     const col = await mongo.getCollection("accomodations");
@@ -291,6 +295,132 @@ router.post("/accomodations", async (req, res, next) => {
     await col.insertOne(accomodationData);
 
     res.status(200).json("Accomodation created successfully");
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/front-desk-users", async (req, res, next) => {
+  const reference = req.query.reference;
+  console.log("reference", reference);
+  try {
+    const col = await mongo.getCollection("management");
+    const frontDeskUsers = await col
+      .find(
+        { role: "Front-Desk", reference: reference },
+        {
+          name: 1,
+          email: 1,
+          phone: 1,
+          role: 1,
+          reference: 1,
+          primaryAccommodationId: 1,
+          passwordHash: 0,
+        },
+      )
+      .toArray();
+    res.json({
+      status: "success",
+      users: frontDeskUsers,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/accomodations/front-desk-users", async (req, res, next) => {
+  try {
+    const accomodationId = req.query.accomodationId;
+    console.log("request accomodation id: ", accomodationId);
+    const col = await mongo.getCollection("management");
+    const frontDeskUsers = await col
+      .find(
+        { role: "Front-Desk", primaryAccommodationId: accomodationId },
+        {
+          name: 1,
+          email: 1,
+          phone: 1,
+          role: 1,
+          reference: 1,
+          primaryAccommodationId: 1,
+          passwordHash: 0,
+        },
+      )
+      .toArray();
+    res.json({ status: "success", users: frontDeskUsers });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/get-wallet", async (req, res, next) => {
+  try {
+    const { accommodationId, ManagementId } = req.body;
+    console.log("Received accommodationId:", accommodationId);
+    console.log("Received ManagementId:", ManagementId);
+    const col = await mongo.getCollection("accomodations");
+    const accomodation = await col.findOne(
+      { _id: new ObjectId(accommodationId) },
+      { wallet: 1 },
+    );
+
+    res.status(200).json({
+      status: "success",
+      wallet: accomodation.wallet,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/set-primary-accommodation", async (req, res, next) => {
+  try {
+    const { accommodationId, ManagementId } = req.body;
+    console.log("Received accommodationId:", accommodationId);
+    console.log("Received ManagementId:", ManagementId);
+    const col = await mongo.getCollection("management");
+    await col.updateOne(
+      { _id: new ObjectId(ManagementId) },
+      { $set: { primaryAccommodationId: accommodationId } },
+    );
+    res.status(200).json({
+      status: "success",
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/update-room-price", async (req, res, next) => {
+  try {
+    const { roomId, newPrice } = req.body;
+
+    const col = await mongo.getCollection("rooms");
+    await col.updateOne(
+      { _id: new ObjectId(roomId) },
+      { $set: { price: newPrice } },
+    );
+    res.status(200).json({
+      status: "success",
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/remove-primary-accommodation", async (req, res, next) => {
+  try {
+    const { accommodationId, ManagementId } = req.body;
+    console.log("Received accommodationId:", accommodationId);
+    console.log("Received ManagementId:", ManagementId);
+    const col = await mongo.getCollection("management");
+    await col.updateOne(
+      { _id: new ObjectId(ManagementId) },
+      { $set: { primaryAccommodationId: null } },
+    );
+    res.status(200).json({
+      status: "success",
+    });
   } catch (err) {
     next(err);
   }
@@ -404,6 +534,9 @@ router.post("/accommodations/register", async (req, res, next) => {
       // Wallet
       wallet,
       // Metadata
+      adminApproval: false,
+      rejected: false,
+      blocked: false,
       createdAt: new Date(),
       updatedAt: new Date(),
       status: "pending", // pending approval
@@ -448,6 +581,9 @@ router.post("/accomodations/rooms", async (req, res, next) => {
     const payload = req.body;
     const accomodationData = {
       ...payload,
+      adminApproval: false,
+      rejected: false,
+      blocked: false,
       createdAt: new Date(),
     };
     const col = await mongo.getCollection("rooms");
@@ -515,7 +651,7 @@ router.post("/bookings", async (req, res, next) => {
     //     },
     //   },
     // );
-    console.log("a", a);
+
     res.status(201).json({
       status: "success",
       message: "Booking created successfully",
@@ -552,6 +688,7 @@ router.post("/booking/checkin", async (req, res, next) => {
 
 router.get("/booking", async (req, res, next) => {
   const receiptReference = req.query.receiptReference;
+  const accomodationReference = req.query.accomodationReference;
   console.log("receiptReference dededed", receiptReference);
   try {
     const col = await mongo.getCollection("bookings");
@@ -589,8 +726,13 @@ router.get("/wallet", async (req, res, next) => {
 
 router.get("/bookings", async (req, res, next) => {
   try {
+    const accommodationReference = req.query.accommodationReference;
+    console.log("accommodationReference", accommodationReference);
     const col = await mongo.getCollection("bookings");
-    const bookings = await col.find({}).toArray();
+    const bookings = await col
+      .find({ accomodationId: accommodationReference })
+      .toArray();
+    console.log("bookings", bookings);
     res.json({
       status: "success",
       bookings,
@@ -665,7 +807,7 @@ router.post("/login", async (req, res, next) => {
     const { passwordHash, ...safe } = admin;
     res.json({
       token,
-      user: { ...safe, reference: admin.owner ? admin._id : admin.reference },
+      user: { ...safe },
     });
   } catch (err) {
     next(err);

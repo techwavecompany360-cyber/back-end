@@ -114,7 +114,7 @@ router.get("/accomodations", async (req, res, next) => {
     const accomodationData = await col
       .aggregate([
         {
-          $match: { adminApproval: true },
+          $match: { adminApproval: true, blocked: false },
         },
         {
           $addFields: {
@@ -124,11 +124,29 @@ router.get("/accomodations", async (req, res, next) => {
         {
           $lookup: {
             from: "rooms",
-            localField: "idAsString",
-            foreignField: "accomodationReference",
+            let: { accId: "$idAsString" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $eq: ["$accomodationReference", "$$accId"],
+                  },
+                  adminApproval: true,
+                  blocked: false,
+                },
+              },
+            ],
             as: "rooms",
           },
         },
+
+        // REMOVE accommodations with no valid rooms
+        {
+          $match: {
+            rooms: { $ne: [] },
+          },
+        },
+
         {
           $addFields: {
             lowestPrice: { $min: "$rooms.price" },
@@ -142,7 +160,6 @@ router.get("/accomodations", async (req, res, next) => {
         },
       ])
       .toArray();
-    console.log(accomodationData);
 
     res.status(200).json({
       status: "success",
