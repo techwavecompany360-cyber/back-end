@@ -563,9 +563,18 @@ router.post("/accommodations/register", async (req, res, next) => {
 
 router.get("/accomodations", async (req, res, next) => {
   try {
+    const reference = req.query.reference; // get reference from URL
+
     const col = await mongo.getCollection("accomodations");
 
-    const accomodationData = await col.find({}).toArray();
+    let query = {};
+
+    // if reference is provided, filter by it
+    if (reference) {
+      query.reference = reference;
+    }
+
+    const accomodationData = await col.find(query).toArray();
 
     res.status(200).json({
       status: "success",
@@ -781,6 +790,107 @@ router.get("/newUser", async (req, res, next) => {
     const safeUsers = users.map(({ passwordHash, ...rest }) => rest);
     res.json(safeUsers);
   } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /management/newUser/:id (update management user)
+router.put("/newUser/:id", async (req, res, next) => {
+  try {
+    console.log("PUT /newUser/:id received");
+    console.log("req.params:", req.params);
+    console.log("req.body:", req.body);
+
+    const { id } = req.params;
+    const { name, email, phone, role, blocked } = req.body;
+
+    // Validate ID - can be either numeric ID or MongoDB ObjectId
+    if (!id) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    // Manual validation
+    if (email && typeof email !== "string") {
+      return res.status(400).json({ error: "Email must be a string" });
+    }
+    if (email && !email.includes("@")) {
+      return res.status(400).json({ error: "Email must be valid" });
+    }
+    if (name && typeof name !== "string") {
+      return res.status(400).json({ error: "Name must be a string" });
+    }
+    if (phone && typeof phone !== "string") {
+      return res.status(400).json({ error: "Phone must be a string" });
+    }
+    if (role && typeof role !== "string") {
+      return res.status(400).json({ error: "Role must be a string" });
+    }
+    if (typeof blocked !== "undefined" && typeof blocked !== "boolean") {
+      return res.status(400).json({ error: "Blocked must be a boolean" });
+    }
+
+    const col = await mongo.getCollection("management");
+
+    // Build query - try MongoDB ObjectId first, fall back to numeric id
+    let query = {};
+    if (ObjectId.isValid(id)) {
+      query = { _id: new ObjectId(id) };
+    } else {
+      query = { id: parseInt(id) };
+    }
+
+    console.log("Query filter:", query);
+
+    // Find existing user
+    const user = await col.findOne(query);
+    console.log("Found user:", user);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Check for duplicate email (if email is being changed)
+    if (email && email !== user.email) {
+      const emailQuery = { email };
+      if (user._id) {
+        emailQuery._id = { $ne: user._id };
+      } else if (user.id) {
+        emailQuery.id = { $ne: user.id };
+      }
+      const existing = await col.findOne(emailQuery);
+      if (existing) {
+        return res.status(409).json({ error: "Email already in use" });
+      }
+    }
+
+    // Build update object
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email;
+    if (phone) updateData.phone = phone;
+    if (role) updateData.role = role;
+    if (typeof blocked !== "undefined") updateData.blocked = blocked;
+    updateData.updatedAt = new Date();
+
+    console.log("Update data:", updateData);
+
+    // Update user in database
+    const result = await col.updateOne(query, { $set: updateData });
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Fetch and return updated user (without password)
+    const updatedUser = await col.findOne(query);
+    const { passwordHash, ...safe } = updatedUser;
+
+    console.log("User updated successfully");
+    res.json({
+      message: "User updated successfully",
+      user: safe,
+    });
+  } catch (err) {
+    console.error("Error in PUT /newUser/:id:", err);
     next(err);
   }
 });
