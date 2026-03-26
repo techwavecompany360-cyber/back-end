@@ -574,7 +574,35 @@ router.get("/accomodations", async (req, res, next) => {
       query.reference = reference;
     }
 
-    const accomodationData = await col.find(query).toArray();
+    const accomodationData = await col.find({}).toArray();
+
+    res.status(200).json({
+      status: "success",
+      accomodationData,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/owner/accomodations", async (req, res, next) => {
+  try {
+    const reference = req.query.reference; // get reference from URL
+
+    const col = await mongo.getCollection("accomodations");
+
+    let query = {};
+
+    // if reference is provided, filter by it
+    if (reference) {
+      query.reference = reference;
+    }
+
+    const accomodationData = await col
+      .find({
+        reference: reference,
+      })
+      .toArray();
 
     res.status(200).json({
       status: "success",
