@@ -49,26 +49,96 @@ router.post("/bookings", async (req, res, next) => {
     const bookingData = req.body;
     console.log(bookingData);
 
+    // Validate required fields
+    if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
+      return res
+        .status(400)
+        .json({ error: "Missing required fields: roomId, checkIn, checkOut" });
+    }
+
     const col = await mongo.getCollection("bookings");
-    const col1 = await mongo.getCollection("accomodations");
+
+    // Check for overlapping bookings
+    const overlappingBookings = await col
+      .find({
+        roomId: bookingData.roomId,
+        $or: [
+          {
+            checkIn: { $lt: new Date(bookingData.checkOut) },
+            checkOut: { $gt: new Date(bookingData.checkIn) },
+          },
+        ],
+      })
+      .toArray();
+
+    if (overlappingBookings.length > 0) {
+      return res.status(409).json({
+        error:
+          "Booking conflict: The selected dates are already booked for this room",
+      });
+    }
 
     const newBooking = await col.insertOne({
       ...bookingData,
+      bookingDates: {
+        checkIn: new Date(bookingData.checkIn),
+        checkOut: new Date(bookingData.checkOut),
+      },
       createdAt: new Date(),
     });
+    const col1 = await mongo.getCollection("accomodations");
     await col1.updateOne(
       { _id: new ObjectId(bookingData.accomodationId) },
       {
         $inc: {
           "wallet.credit":
-            parseFloat(bookingData.roomPrice) * parseInt(bookingData.nights),
+            parseFloat(bookingData.roomPrice) *
+            parseInt(bookingData.nights) *
+            0.9,
         },
       },
     );
     res.status(201).json({
       status: "success",
       message: "Booking created successfully",
+      bookingId: newBooking.insertedId,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/bookings", async (req, res, next) => {
+  try {
+    const bookingId = req.query.bookingId ? String(req.query.bookingId) : "";
+    const email = req.query.email ? String(req.query.email).toLowerCase() : "";
+    const phone = req.query.phone ? String(req.query.phone) : "";
+
+    if (!bookingId && !email && !phone) {
+      return res
+        .status(400)
+        .json({ error: "bookingId, email, or phone is required" });
+    }
+
+    const col = await mongo.getCollection("bookings");
+    const filter = {};
+
+    if (bookingId) {
+      filter.bookingId = bookingId;
+    } else if (email && phone) {
+      filter.$or = [{ email }, { phone }];
+    } else if (email) {
+      filter.email = email;
+    } else if (phone) {
+      filter.phone = phone;
+    }
+
+    const bookings = await col.find(filter).toArray();
+    if (!bookings.length) {
+      return res.status(404).json({ error: "Booking not found" });
+    }
+
+    res.json({ status: "success", bookings });
   } catch (err) {
     next(err);
   }
@@ -133,6 +203,85 @@ router.get("/accomodations", async (req, res, next) => {
                   },
                   adminApproval: true,
                   blocked: false,
+                },
+              },
+              // Add booked dates for each room
+              {
+                $lookup: {
+                  from: "bookings",
+                  let: { roomId: { $toString: "$_id" } },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: ["$roomId", "$$roomId"],
+                        },
+                      },
+                    },
+                    {
+                      $addFields: {
+                        checkInDate: {
+                          $dateFromString: { dateString: "$checkIn" },
+                        },
+                        checkOutDate: {
+                          $dateFromString: { dateString: "$checkOut" },
+                        },
+                      },
+                    },
+                    {
+                      $addFields: {
+                        daysDifference: {
+                          $divide: [
+                            { $subtract: ["$checkOutDate", "$checkInDate"] },
+                            86400000, // milliseconds in a day
+                          ],
+                        },
+                      },
+                    },
+                    {
+                      $addFields: {
+                        dateRange: {
+                          $map: {
+                            input: {
+                              $range: [0, { $add: ["$daysDifference", 1] }],
+                            },
+                            as: "dayOffset",
+                            in: {
+                              $dateToString: {
+                                format: "%Y-%m-%d",
+                                date: {
+                                  $dateAdd: {
+                                    startDate: "$checkInDate",
+                                    unit: "day",
+                                    amount: "$$dayOffset",
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    {
+                      $project: {
+                        _id: 0,
+                        dates: "$dateRange",
+                      },
+                    },
+                  ],
+                  as: "bookings",
+                },
+              },
+              {
+                $addFields: {
+                  bookedDates: {
+                    $setUnion: "$bookings.dates",
+                  },
+                },
+              },
+              {
+                $project: {
+                  bookings: 0,
                 },
               },
             ],

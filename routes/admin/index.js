@@ -28,7 +28,7 @@ router.get("/stats", async (req, res, next) => {
   }
 });
 
-router.post("/management/profile", async (req, res, next) => {
+router.post("/management/profile", authMiddleware, async (req, res, next) => {
   try {
     const ownerId = req.body.ownerId;
     console.log("Owner ID:", ownerId);
@@ -41,7 +41,7 @@ router.post("/management/profile", async (req, res, next) => {
     next(err);
   }
 });
-router.get("/management/owners", async (req, res, next) => {
+router.get("/management/owners", authMiddleware, async (req, res, next) => {
   try {
     const col = await mongo.getCollection("management");
     const notes = await col.find({ owner: true }).toArray();
@@ -50,7 +50,59 @@ router.get("/management/owners", async (req, res, next) => {
     next(err);
   }
 });
-router.get("/management", async (req, res, next) => {
+router.post(
+  "/management/owners/approve",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const { ownerId } = req.body;
+      if (!ownerId)
+        return res.status(400).json({ error: "ownerId is required" });
+
+      const col = await mongo.getCollection("management");
+      const result = await col.updateOne(
+        { _id: new ObjectId(ownerId) },
+        { $set: { adminApproval: true, approvedState: "Approved" } },
+      );
+
+      if (result.matchedCount === 0)
+        return res.status(404).json({ error: "Owner not found" });
+
+      res.status(200).json({ message: "Owner account approved successfully" });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+router.get(
+  "/management/owner/accomodations",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const reference = req.query.reference;
+      const col = await mongo.getCollection("accomodations");
+      const accomodationData = await col.find({ reference }).toArray();
+      res.status(200).json({ status: "success", accomodationData });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+router.get(
+  "/management/accomodations/rooms",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const id = req.query.id;
+      const col = await mongo.getCollection("rooms");
+      const roomsData = await col.find({ accomodationReference: id }).toArray();
+      res.status(200).json({ status: "success", roomsData });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+router.get("/management", authMiddleware, async (req, res, next) => {
   try {
     const col = await mongo.getCollection("management");
     const notes = await col.find({}).toArray();
@@ -108,14 +160,22 @@ router.post("/login", async (req, res, next) => {
   try {
     const { email, password } = req.body;
     if (!email || !password)
-      return res.status(400).json({ error: "email and password required" });
+      return res
+        .status(400)
+        .json({ error: "Please provide both email and password." });
     const col = await mongo.getCollection("admin");
     const admin = await col.findOne({ email });
     console.log(admin);
-    if (!admin) return res.status(401).json({ error: "invalid credentials" });
+    if (!admin)
+      return res
+        .status(401)
+        .json({ error: "The email or password you entered is incorrect." });
     const ok = await bcrypt.compare(password, admin.passwordHash);
     console.log("Password match:", ok);
-    if (!ok) return res.status(401).json({ error: "invalid credentials" });
+    if (!ok)
+      return res
+        .status(401)
+        .json({ error: "The email or password you entered is incorrect." });
     const token = sign({ email: admin.email, id: admin.id, role: "admin" });
     res.json({ token });
   } catch (err) {
