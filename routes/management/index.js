@@ -561,7 +561,7 @@ router.post(
         // Wallet
         wallet,
         // Homestay specifics
-        ...(finalPayload.type === 'homestay' && {
+        ...(finalPayload.type === "homestay" && {
           hostBio: finalPayload.hostBio,
           languagesSpoken: finalPayload.languagesSpoken,
           houseRules: finalPayload.houseRules,
@@ -581,7 +581,7 @@ router.post(
       const result = await col.insertOne(accommodationRecord);
 
       // Virtual Room integration for Homestays
-      if (finalPayload.type === 'homestay') {
+      if (finalPayload.type === "homestay") {
         const roomsCol = await mongo.getCollection("rooms");
         await roomsCol.insertOne({
           roomName: "Entire Home",
@@ -590,7 +590,8 @@ router.post(
           capacity: Number(finalPayload.maxGuests) || 1,
           price: Number(finalPayload.pricePerNight) || 0,
           amenities: finalPayload.amenities,
-          otherImagesCount: finalPayload.otherImagesCount || finalPayload.otherImages.length,
+          otherImagesCount:
+            finalPayload.otherImagesCount || finalPayload.otherImages.length,
           frontImage: finalPayload.frontImage,
           otherImages: finalPayload.otherImages,
           available: "Available",
@@ -663,7 +664,14 @@ router.get("/accomodations", requireAuth, async (req, res, next) => {
                         $expr: {
                           $eq: ["$roomId", "$$roomId"],
                         },
-                        status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
+                        status: {
+                          $nin: [
+                            "Cancelled",
+                            "cancelled",
+                            "Checked-Out",
+                            "checked-out",
+                          ],
+                        },
                       },
                     },
                     {
@@ -672,15 +680,23 @@ router.get("/accomodations", requireAuth, async (req, res, next) => {
                           $cond: {
                             if: { $eq: [{ $type: "$checkIn" }, "date"] },
                             then: "$checkIn",
-                            else: { $dateFromString: { dateString: { $toString: "$checkIn" } } }
-                          }
+                            else: {
+                              $dateFromString: {
+                                dateString: { $toString: "$checkIn" },
+                              },
+                            },
+                          },
                         },
                         checkOutDate: {
                           $cond: {
                             if: { $eq: [{ $type: "$checkOut" }, "date"] },
                             then: "$checkOut",
-                            else: { $dateFromString: { dateString: { $toString: "$checkOut" } } }
-                          }
+                            else: {
+                              $dateFromString: {
+                                dateString: { $toString: "$checkOut" },
+                              },
+                            },
+                          },
                         },
                       },
                     },
@@ -734,8 +750,8 @@ router.get("/accomodations", requireAuth, async (req, res, next) => {
                     $reduce: {
                       input: "$bookings.dates",
                       initialValue: [],
-                      in: { $setUnion: ["$$value", "$$this"] }
-                    }
+                      in: { $setUnion: ["$$value", "$$this"] },
+                    },
                   },
                 },
               },
@@ -854,7 +870,14 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
                   $expr: {
                     $eq: ["$roomId", "$$roomId"],
                   },
-                  status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
+                  status: {
+                    $nin: [
+                      "Cancelled",
+                      "cancelled",
+                      "Checked-Out",
+                      "checked-out",
+                    ],
+                  },
                 },
               },
               {
@@ -863,15 +886,23 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
                     $cond: {
                       if: { $eq: [{ $type: "$checkIn" }, "date"] },
                       then: "$checkIn",
-                      else: { $dateFromString: { dateString: { $toString: "$checkIn" } } }
-                    }
+                      else: {
+                        $dateFromString: {
+                          dateString: { $toString: "$checkIn" },
+                        },
+                      },
+                    },
                   },
                   checkOutDate: {
                     $cond: {
                       if: { $eq: [{ $type: "$checkOut" }, "date"] },
                       then: "$checkOut",
-                      else: { $dateFromString: { dateString: { $toString: "$checkOut" } } }
-                    }
+                      else: {
+                        $dateFromString: {
+                          dateString: { $toString: "$checkOut" },
+                        },
+                      },
+                    },
                   },
                 },
               },
@@ -925,8 +956,8 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
               $reduce: {
                 input: "$bookings.dates",
                 initialValue: [],
-                in: { $setUnion: ["$$value", "$$this"] }
-              }
+                in: { $setUnion: ["$$value", "$$this"] },
+              },
             },
           },
         },
@@ -949,7 +980,10 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
 router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
   try {
     const bookingData = req.body;
-    console.log("=== INCOMING MANAGEMENT BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
+    console.log(
+      "=== INCOMING MANAGEMENT BOOKING DATA ===",
+      JSON.stringify(bookingData, null, 2),
+    );
 
     // Validate required fields
     if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
@@ -968,7 +1002,9 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
     const overlappingBookings = await col
       .find({
         roomId: bookingData.roomId,
-        status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
+        status: {
+          $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"],
+        },
         "bookingDates.checkIn": { $lt: parsedCheckOut },
         "bookingDates.checkOut": { $gt: parsedCheckIn },
       })
@@ -982,7 +1018,9 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
     }
 
     // Calculate platform fee info for management bookings
-    const totalBookingAmount = (parseFloat(bookingData.roomPrice) || 0) * (parseInt(bookingData.nights) || 1);
+    const totalBookingAmount =
+      (parseFloat(bookingData.roomPrice) || 0) *
+      (parseInt(bookingData.nights) || 1);
     const platformFeeRate = 0.01; // 1% for management bookings
     const platformFee = totalBookingAmount * platformFeeRate;
     const hostShare = totalBookingAmount - platformFee;
@@ -1134,8 +1172,15 @@ router.post(
   async (req, res, next) => {
     try {
       const { bookingId, description, amount } = req.body;
-      if (!bookingId || !description || typeof amount !== "number" || amount <= 0) {
-        return res.status(400).json({ error: "bookingId, description and a positive amount are required" });
+      if (
+        !bookingId ||
+        !description ||
+        typeof amount !== "number" ||
+        amount <= 0
+      ) {
+        return res.status(400).json({
+          error: "bookingId, description and a positive amount are required",
+        });
       }
 
       const col = await mongo.getCollection("bookings");
@@ -1174,7 +1219,9 @@ router.post(
     try {
       const { bookingId, method, amount } = req.body;
       if (!bookingId || !method || typeof amount !== "number" || amount <= 0) {
-        return res.status(400).json({ error: "bookingId, method and a positive amount are required" });
+        return res.status(400).json({
+          error: "bookingId, method and a positive amount are required",
+        });
       }
 
       const col = await mongo.getCollection("bookings");
@@ -1415,7 +1462,9 @@ router.post(
         return res.status(400).json({ error: "accommodationId is required" });
       }
       if (typeof amount !== "number" || amount <= 0) {
-        return res.status(400).json({ error: "Amount must be a positive number" });
+        return res
+          .status(400)
+          .json({ error: "Amount must be a positive number" });
       }
 
       const accCol = await mongo.getCollection("accomodations");
@@ -1433,7 +1482,9 @@ router.post(
       const currentDebit = wallet.debit || 0;
 
       if (currentCredit <= 0) {
-        return res.status(400).json({ error: "Insufficient credit balance to pay debit" });
+        return res
+          .status(400)
+          .json({ error: "Insufficient credit balance to pay debit" });
       }
 
       if (currentDebit <= 0) {
@@ -1520,7 +1571,8 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
     const startDateRaw = req.query.startDate;
     const endDateRaw = req.query.endDate;
 
-    const userRole = (req.user && req.user.role) ? req.user.role.toLowerCase() : "";
+    const userRole =
+      req.user && req.user.role ? req.user.role.toLowerCase() : "";
     const isOwner = userRole === "manager" || userRole === "owner";
     const userReference = isOwner ? req.user.reference : null;
 
@@ -1534,22 +1586,27 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
       }
     }
 
-    const matchedAccs = await accomodationsCol.find(accMatch, { projection: { _id: 1, id: 1 } }).toArray();
-    const strIds = matchedAccs.map(a => a._id.toString());
-    const objIds = matchedAccs.map(a => a._id);
-    const numIds = matchedAccs.map(a => a.id).filter(id => id != null);
-    const numStrIds = numIds.map(id => String(id));
+    const matchedAccs = await accomodationsCol
+      .find(accMatch, { projection: { _id: 1, id: 1 } })
+      .toArray();
+    const strIds = matchedAccs.map((a) => a._id.toString());
+    const objIds = matchedAccs.map((a) => a._id);
+    const numIds = matchedAccs.map((a) => a.id).filter((id) => id != null);
+    const numStrIds = numIds.map((id) => String(id));
 
-    let bookingMatch = (userReference || accommodationId) ? {
-      $or: [
-        { accomodationId: { $in: [...strIds, ...numStrIds] } },
-        { accommodationId: { $in: [...strIds, ...numStrIds] } },
-        { accomodationId: { $in: objIds } },
-        { accommodationId: { $in: objIds } },
-        { accomodationId: { $in: numIds } },
-        { accommodationId: { $in: numIds } }
-      ]
-    } : {};
+    let bookingMatch =
+      userReference || accommodationId
+        ? {
+            $or: [
+              { accomodationId: { $in: [...strIds, ...numStrIds] } },
+              { accommodationId: { $in: [...strIds, ...numStrIds] } },
+              { accomodationId: { $in: objIds } },
+              { accommodationId: { $in: objIds } },
+              { accomodationId: { $in: numIds } },
+              { accommodationId: { $in: numIds } },
+            ],
+          }
+        : {};
 
     // If bounded logic resulted in no matched accs, zero-out bookings match
     if ((userReference || accommodationId) && matchedAccs.length === 0) {
@@ -1612,7 +1669,15 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
     // Calculate Financial Revenue Trend
     const monthlyRevenueAgg = await bookingsCol
       .aggregate([
-        { $match: { ...finalBookingMatch, createdAt: { $exists: true }, status: { $nin: ["cancelled", "Cancelled", "rejected", "Rejected"] } } },
+        {
+          $match: {
+            ...finalBookingMatch,
+            createdAt: { $exists: true },
+            status: {
+              $nin: ["cancelled", "Cancelled", "rejected", "Rejected"],
+            },
+          },
+        },
         {
           $group: {
             _id: {
@@ -1660,7 +1725,23 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
     const totalRooms = totalRoomsResult[0]?.total || 0;
 
     // Fast-calc for Total Revenue and Cancellation Rate
-    const performanceBookings = await bookingsCol.find(finalBookingMatch, { projection: { status: 1, totalAmount: 1, source: 1, checkIn: 1, checkOut: 1, from: 1, to: 1, nights: 1, createdAt: 1, paymentMethodUsed: 1, paymentMethod: 1 } }).toArray();
+    const performanceBookings = await bookingsCol
+      .find(finalBookingMatch, {
+        projection: {
+          status: 1,
+          totalAmount: 1,
+          source: 1,
+          checkIn: 1,
+          checkOut: 1,
+          from: 1,
+          to: 1,
+          nights: 1,
+          createdAt: 1,
+          paymentMethodUsed: 1,
+          paymentMethod: 1,
+        },
+      })
+      .toArray();
     let totalRevenueSum = 0;
     let failedCount = 0;
     let sourceOnline = 0;
@@ -1684,7 +1765,7 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
       } else {
         totalRevenueSum += Number(b.totalAmount) || 0;
 
-        if (b.source && String(b.source).toLowerCase() === 'management') {
+        if (b.source && String(b.source).toLowerCase() === "management") {
           sourceFrontDesk++;
         } else {
           sourceOnline++;
@@ -1698,7 +1779,10 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
             const cIn = new Date(cInStr).getTime();
             const cOut = new Date(cOutStr).getTime();
             if (!isNaN(cIn) && !isNaN(cOut) && cOut > cIn) {
-              nights = Math.max(1, Math.round((cOut - cIn) / (1000 * 3600 * 24)));
+              nights = Math.max(
+                1,
+                Math.round((cOut - cIn) / (1000 * 3600 * 24)),
+              );
             }
           }
         }
@@ -1720,10 +1804,16 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
         const pm = b.paymentMethodUsed || b.paymentMethod || "Unknown";
         const standardPm = String(pm).trim().toLowerCase();
         let label = "Other";
-        if (standardPm.includes('card') || standardPm.includes('stripe')) label = 'Credit / Debit';
-        else if (standardPm.includes('mobile') || standardPm.includes('m-pesa') || standardPm.includes('mpesa')) label = 'Mobile Money';
-        else if (standardPm.includes('cash')) label = 'Cash';
-        else if (standardPm.includes('bank')) label = 'Bank Transfer';
+        if (standardPm.includes("card") || standardPm.includes("stripe"))
+          label = "Credit / Debit";
+        else if (
+          standardPm.includes("mobile") ||
+          standardPm.includes("m-pesa") ||
+          standardPm.includes("mpesa")
+        )
+          label = "Mobile Money";
+        else if (standardPm.includes("cash")) label = "Cash";
+        else if (standardPm.includes("bank")) label = "Bank Transfer";
         else if (standardPm !== "unknown") label = String(pm);
 
         paymentMethodsCount[label] = (paymentMethodsCount[label] || 0) + 1;
@@ -1738,31 +1828,54 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
 
           if (cInDateObj.getTime() === today.getTime()) checkInsToday++;
           if (cOutDateObj.getTime() === today.getTime()) checkOutsToday++;
-          if (cInDateObj.getTime() <= today.getTime() && cOutDateObj.getTime() > today.getTime()) {
+          if (
+            cInDateObj.getTime() <= today.getTime() &&
+            cOutDateObj.getTime() > today.getTime()
+          ) {
             inHouse++;
           }
         }
       }
     }
     const validBookingsCount = performanceBookings.length - failedCount;
-    const adr = totalNightsSold > 0 ? (totalRevenueSum / totalNightsSold) : 0;
-    const alos = validBookingsCount > 0 ? (totalNightsSold / validBookingsCount) : 0;
-    const cancellationRate = performanceBookings.length > 0 ? ((failedCount / performanceBookings.length) * 100).toFixed(1) : 0;
+    const adr = totalNightsSold > 0 ? totalRevenueSum / totalNightsSold : 0;
+    const alos =
+      validBookingsCount > 0 ? totalNightsSold / validBookingsCount : 0;
+    const cancellationRate =
+      performanceBookings.length > 0
+        ? ((failedCount / performanceBookings.length) * 100).toFixed(1)
+        : 0;
 
     // Approximation of Occupancy. For actual occupancy you'd calculate against Room Count * Days in range
     // Assuming 'Occupancy' here means "Number of valid bookings mapped out of potential capacity proxy".
     // 1 booking per room per interval base:
-    const baseInterval = (startDateRaw && endDateRaw)
-      ? Math.max(1, (new Date(endDateRaw).getTime() - new Date(startDateRaw).getTime()) / (1000 * 3600 * 24))
-      : 30; // default proxy
-    let occupancyRate = totalRooms > 0 ? (((performanceBookings.length - failedCount) / (totalRooms * (baseInterval / 3))) * 100).toFixed(1) : 0;
+    const baseInterval =
+      startDateRaw && endDateRaw
+        ? Math.max(
+            1,
+            (new Date(endDateRaw).getTime() -
+              new Date(startDateRaw).getTime()) /
+              (1000 * 3600 * 24),
+          )
+        : 30; // default proxy
+    let occupancyRate =
+      totalRooms > 0
+        ? (
+            ((performanceBookings.length - failedCount) /
+              (totalRooms * (baseInterval / 3))) *
+            100
+          ).toFixed(1)
+        : 0;
     if (Number(occupancyRate) > 100) occupancyRate = "100.0"; // clamp
 
     const revpar = Number(adr) * (Number(occupancyRate) / 100);
-    const averageLeadTime = leadTimeBookingsCount > 0 ? (totalLeadTimeDays / leadTimeBookingsCount) : 0;
+    const averageLeadTime =
+      leadTimeBookingsCount > 0 ? totalLeadTimeDays / leadTimeBookingsCount : 0;
 
     // Format payment methods for chart
-    const paymentMethodsArr = Object.keys(paymentMethodsCount).map(k => ({ label: k, count: paymentMethodsCount[k] })).sort((a, b) => b.count - a.count);
+    const paymentMethodsArr = Object.keys(paymentMethodsCount)
+      .map((k) => ({ label: k, count: paymentMethodsCount[k] }))
+      .sort((a, b) => b.count - a.count);
 
     res.json({
       status: "success",
@@ -1780,7 +1893,7 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
       operationLoad: {
         checkInsToday,
         checkOutsToday,
-        inHouse
+        inHouse,
       },
       paymentMethods: paymentMethodsArr,
       sourceOnline,
@@ -1988,18 +2101,14 @@ router.post("/login", async (req, res, next) => {
       return res
         .status(401)
         .json({ error: "The email or password you entered is incorrect." });
-    if (admin.blocked || true)
-      return res
-        .status(403)
-        .json({
-          error: "Your account has been suspended. Please contact support.",
-        });
-    if (admin.adminApproval === false)
-      return res
-        .status(403)
-        .json({
-          error: "Your account is pending approval. Please check back later.",
-        });
+    if (admin.blocked)
+      return res.status(403).json({
+        error: "Your account has been suspended. Please contact support.",
+      });
+    if (false && admin.adminApproval === false)
+      return res.status(403).json({
+        error: "Your account is pending approval. Please check back later.",
+      });
     const ok = await bcrypt.compare(password, admin.passwordHash);
     if (!ok)
       return res
@@ -2247,17 +2356,13 @@ async function requireAuth(req, res, next) {
 
     const blocked = !!user.blocked;
     if (blocked)
-      return res
-        .status(403)
-        .json({
-          error: "Your account has been suspended. Please contact support.",
-        });
+      return res.status(403).json({
+        error: "Your account has been suspended. Please contact support.",
+      });
     if (user.adminApproval === false)
-      return res
-        .status(403)
-        .json({
-          error: "Your account is pending approval. Please check back later.",
-        });
+      return res.status(403).json({
+        error: "Your account is pending approval. Please check back later.",
+      });
 
     const normalizedRole = (user.role || "user").toString().toLowerCase();
     req.user = {
