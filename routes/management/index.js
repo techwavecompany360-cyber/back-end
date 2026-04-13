@@ -560,6 +560,13 @@ router.post(
         registerName: finalPayload.registerName,
         // Wallet
         wallet,
+        // Homestay specifics
+        ...(finalPayload.type === 'homestay' && {
+          hostBio: finalPayload.hostBio,
+          languagesSpoken: finalPayload.languagesSpoken,
+          houseRules: finalPayload.houseRules,
+          interactionLevel: finalPayload.interactionLevel,
+        }),
         // Metadata
         adminApproval: false,
         rejected: false,
@@ -572,6 +579,27 @@ router.post(
       // Store in database
       const col = await mongo.getCollection("accommodations");
       const result = await col.insertOne(accommodationRecord);
+
+      // Virtual Room integration for Homestays
+      if (finalPayload.type === 'homestay') {
+        const roomsCol = await mongo.getCollection("rooms");
+        await roomsCol.insertOne({
+          roomName: "Entire Home",
+          accomodationReference: result.insertedId.toString(),
+          description: "Exclusive use of the entire homestay.",
+          capacity: Number(finalPayload.maxGuests) || 1,
+          price: Number(finalPayload.pricePerNight) || 0,
+          amenities: finalPayload.amenities,
+          otherImagesCount: finalPayload.otherImagesCount || finalPayload.otherImages.length,
+          frontImage: finalPayload.frontImage,
+          otherImages: finalPayload.otherImages,
+          available: "Available",
+          adminApproval: false,
+          rejected: false,
+          blocked: false,
+          createdAt: new Date(),
+        });
+      }
 
       res.status(201).json({
         message: "Accommodation registered successfully",
@@ -635,15 +663,24 @@ router.get("/accomodations", requireAuth, async (req, res, next) => {
                         $expr: {
                           $eq: ["$roomId", "$$roomId"],
                         },
+                        status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
                       },
                     },
                     {
                       $addFields: {
                         checkInDate: {
-                          $dateFromString: { dateString: "$checkIn" },
+                          $cond: {
+                            if: { $eq: [{ $type: "$checkIn" }, "date"] },
+                            then: "$checkIn",
+                            else: { $dateFromString: { dateString: { $toString: "$checkIn" } } }
+                          }
                         },
                         checkOutDate: {
-                          $dateFromString: { dateString: "$checkOut" },
+                          $cond: {
+                            if: { $eq: [{ $type: "$checkOut" }, "date"] },
+                            then: "$checkOut",
+                            else: { $dateFromString: { dateString: { $toString: "$checkOut" } } }
+                          }
                         },
                       },
                     },
@@ -694,7 +731,11 @@ router.get("/accomodations", requireAuth, async (req, res, next) => {
               {
                 $addFields: {
                   bookedDates: {
-                    $setUnion: "$bookings.dates",
+                    $reduce: {
+                      input: "$bookings.dates",
+                      initialValue: [],
+                      in: { $setUnion: ["$$value", "$$this"] }
+                    }
                   },
                 },
               },
@@ -813,15 +854,24 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
                   $expr: {
                     $eq: ["$roomId", "$$roomId"],
                   },
+                  status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
                 },
               },
               {
                 $addFields: {
                   checkInDate: {
-                    $dateFromString: { dateString: "$checkIn" },
+                    $cond: {
+                      if: { $eq: [{ $type: "$checkIn" }, "date"] },
+                      then: "$checkIn",
+                      else: { $dateFromString: { dateString: { $toString: "$checkIn" } } }
+                    }
                   },
                   checkOutDate: {
-                    $dateFromString: { dateString: "$checkOut" },
+                    $cond: {
+                      if: { $eq: [{ $type: "$checkOut" }, "date"] },
+                      then: "$checkOut",
+                      else: { $dateFromString: { dateString: { $toString: "$checkOut" } } }
+                    }
                   },
                 },
               },
@@ -872,7 +922,11 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
         {
           $addFields: {
             bookedDates: {
-              $setUnion: "$bookings.dates",
+              $reduce: {
+                input: "$bookings.dates",
+                initialValue: [],
+                in: { $setUnion: ["$$value", "$$this"] }
+              }
             },
           },
         },
@@ -895,6 +949,7 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
 router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
   try {
     const bookingData = req.body;
+    console.log("=== INCOMING MANAGEMENT BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
 
     // Validate required fields
     if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
@@ -905,16 +960,17 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
 
     const col = await mongo.getCollection("bookings");
 
-    // Check for overlapping bookings
+    const parsedCheckIn = new Date(bookingData.checkIn);
+    const parsedCheckOut = new Date(bookingData.checkOut);
+
+    // Check for overlapping bookings using Date-typed fields
+    // Exclude cancelled and checked-out bookings from overlap check
     const overlappingBookings = await col
       .find({
         roomId: bookingData.roomId,
-        $or: [
-          {
-            checkIn: { $lt: new Date(bookingData.checkOut) },
-            checkOut: { $gt: new Date(bookingData.checkIn) },
-          },
-        ],
+        status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
+        "bookingDates.checkIn": { $lt: parsedCheckOut },
+        "bookingDates.checkOut": { $gt: parsedCheckIn },
       })
       .toArray();
 
@@ -925,14 +981,62 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
       });
     }
 
+    // Calculate platform fee info for management bookings
+    const totalBookingAmount = (parseFloat(bookingData.roomPrice) || 0) * (parseInt(bookingData.nights) || 1);
+    const platformFeeRate = 0.01; // 1% for management bookings
+    const platformFee = totalBookingAmount * platformFeeRate;
+    const hostShare = totalBookingAmount - platformFee;
+
     const newBooking = await col.insertOne({
       ...bookingData,
+      checkIn: parsedCheckIn,
+      checkOut: parsedCheckOut,
       bookingDates: {
-        checkIn: new Date(bookingData.checkIn),
-        checkOut: new Date(bookingData.checkOut),
+        checkIn: parsedCheckIn,
+        checkOut: parsedCheckOut,
       },
+      // Fee & wallet metadata
+      source: bookingData.source || "Management",
+      totalBookingAmount,
+      platformFee,
+      platformFeeRate,
+      hostShare,
+      walletAction: "debit",
       createdAt: new Date(),
     });
+
+    // Debit accommodation wallet (1% platform fee for management bookings)
+    if (bookingData.accomodationId && platformFee > 0) {
+      try {
+        const accCol = await mongo.getCollection("accomodations");
+        await accCol.updateOne(
+          { _id: new ObjectId(bookingData.accomodationId) },
+          {
+            $inc: {
+              "wallet.debit": platformFee,
+            },
+          },
+        );
+        // Record transaction
+        const txCol = await mongo.getCollection("wallet_transactions");
+        await txCol.insertOne({
+          accommodationId: bookingData.accomodationId,
+          type: "booking_debit",
+          description: `Front desk booking for ${bookingData.guestName || "Guest"}`,
+          amount: platformFee,
+          fee: platformFee,
+          feeRate: platformFeeRate,
+          grossAmount: totalBookingAmount,
+          source: "Management",
+          bookingId: newBooking.insertedId.toString(),
+          guestName: bookingData.guestName || "",
+          roomName: bookingData.roomName || "",
+          createdAt: new Date(),
+        });
+      } catch (walletErr) {
+        console.warn("Wallet debit failed for management booking:", walletErr);
+      }
+    }
 
     res.status(201).json({
       status: "success",
@@ -964,6 +1068,7 @@ router.post(
         $set: {
           checkInStatus: "Checked-In",
           status: "Checked-In",
+          actualCheckIn: new Date(),
           updatedAt: new Date(),
         },
       });
@@ -1002,6 +1107,7 @@ router.post(
         $set: {
           checkInStatus: "Checked-Out",
           status: "Checked-Out",
+          actualCheckOut: new Date(),
           updatedAt: new Date(),
         },
       });
@@ -1014,6 +1120,84 @@ router.post(
         status: "success",
         message: "Booking checked out successfully",
       });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── Folio: Add Charge ──
+router.post(
+  "/booking/folio/charge",
+  writeLimiter,
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const { bookingId, description, amount } = req.body;
+      if (!bookingId || !description || typeof amount !== "number" || amount <= 0) {
+        return res.status(400).json({ error: "bookingId, description and a positive amount are required" });
+      }
+
+      const col = await mongo.getCollection("bookings");
+      const query = ObjectId.isValid(bookingId)
+        ? { _id: new ObjectId(bookingId) }
+        : { bookingId: bookingId };
+
+      const result = await col.updateOne(query, {
+        $push: {
+          "folio.charges": {
+            description,
+            amount,
+            addedAt: new Date(),
+          },
+        },
+        $set: { updatedAt: new Date() },
+      });
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      res.json({ status: "success", message: "Charge added to folio" });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ── Folio: Add Payment ──
+router.post(
+  "/booking/folio/payment",
+  writeLimiter,
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const { bookingId, method, amount } = req.body;
+      if (!bookingId || !method || typeof amount !== "number" || amount <= 0) {
+        return res.status(400).json({ error: "bookingId, method and a positive amount are required" });
+      }
+
+      const col = await mongo.getCollection("bookings");
+      const query = ObjectId.isValid(bookingId)
+        ? { _id: new ObjectId(bookingId) }
+        : { bookingId: bookingId };
+
+      const result = await col.updateOne(query, {
+        $push: {
+          "folio.payments": {
+            method,
+            amount,
+            addedAt: new Date(),
+          },
+        },
+        $set: { updatedAt: new Date() },
+      });
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      res.json({ status: "success", message: "Payment added to folio" });
     } catch (err) {
       next(err);
     }
@@ -1152,6 +1336,22 @@ router.post(
           },
         });
 
+        // Record withdrawal transaction
+        try {
+          const txCol = await mongo.getCollection("wallet_transactions");
+          await txCol.insertOne({
+            accommodationId: accommodationId,
+            type: "withdrawal",
+            description: `Withdrawal via ${payoutMethod || "unknown"}`,
+            amount: amount,
+            payoutMethod: payoutMethod || null,
+            source: "Management",
+            createdAt: new Date(),
+          });
+        } catch (txErr) {
+          console.warn("Failed to record withdrawal transaction:", txErr);
+        }
+
         return res.status(200).json({
           status: "success",
           payoutMethod: payoutMethod || null,
@@ -1202,25 +1402,188 @@ router.post(
   },
 );
 
+// Pay debit (platform fees) using credit balance
+router.post(
+  "/wallet/pay-debit",
+  writeLimiter,
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const { accommodationId, amount } = req.body;
+
+      if (!accommodationId) {
+        return res.status(400).json({ error: "accommodationId is required" });
+      }
+      if (typeof amount !== "number" || amount <= 0) {
+        return res.status(400).json({ error: "Amount must be a positive number" });
+      }
+
+      const accCol = await mongo.getCollection("accomodations");
+      const query = ObjectId.isValid(accommodationId)
+        ? { _id: new ObjectId(accommodationId) }
+        : { reference: accommodationId };
+
+      const result = await accCol.findOne(query, { wallet: 1 });
+      if (!result) {
+        return res.status(404).json({ error: "Accommodation not found" });
+      }
+
+      const wallet = result.wallet || { credit: 0, debit: 0, balance: 0 };
+      const currentCredit = wallet.credit || 0;
+      const currentDebit = wallet.debit || 0;
+
+      if (currentCredit <= 0) {
+        return res.status(400).json({ error: "Insufficient credit balance to pay debit" });
+      }
+
+      if (currentDebit <= 0) {
+        return res.status(400).json({ error: "No outstanding debit to pay" });
+      }
+
+      // The actual amount to transfer is the min of: requested amount, available credit, outstanding debit
+      const transferAmount = Math.min(amount, currentCredit, currentDebit);
+
+      const newCredit = currentCredit - transferAmount;
+      const newDebit = currentDebit - transferAmount;
+      const newBalance = Math.max((wallet.balance || 0) - transferAmount, 0);
+
+      await accCol.updateOne(query, {
+        $set: {
+          "wallet.credit": newCredit,
+          "wallet.debit": newDebit,
+          "wallet.balance": newBalance,
+        },
+      });
+
+      // Record debit payment transaction
+      try {
+        const txCol = await mongo.getCollection("wallet_transactions");
+        await txCol.insertOne({
+          accommodationId: accommodationId,
+          type: "debit_payment",
+          description: `Platform fee payment from credit`,
+          amount: transferAmount,
+          source: "Management",
+          createdAt: new Date(),
+        });
+      } catch (txErr) {
+        console.warn("Failed to record debit payment transaction:", txErr);
+      }
+
+      return res.status(200).json({
+        status: "success",
+        message: `Successfully paid ${transferAmount} from credit towards debit`,
+        transferred: transferAmount,
+        wallet: {
+          credit: newCredit,
+          debit: newDebit,
+          balance: newBalance,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Get all wallet transactions for an accommodation
+router.get("/wallet/all-transactions", requireAuth, async (req, res, next) => {
+  try {
+    const accommodationId = req.query.accommodationId;
+    if (!accommodationId) {
+      return res.status(400).json({ error: "accommodationId is required" });
+    }
+
+    const txCol = await mongo.getCollection("wallet_transactions");
+    const transactions = await txCol
+      .find({ accommodationId: String(accommodationId) })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .toArray();
+
+    return res.status(200).json({
+      status: "success",
+      transactions,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/analytics/summary", requireAuth, async (req, res, next) => {
   try {
     const accomodationsCol = await mongo.getCollection("accomodations");
     const bookingsCol = await mongo.getCollection("bookings");
     const managementCol = await mongo.getCollection("management");
 
-    const totalAccommodations = await accomodationsCol.countDocuments({});
-    const totalUsers = await managementCol.countDocuments({});
-    const totalBookings = await bookingsCol.countDocuments({});
+    const accommodationId = req.query.accommodationId;
+    const startDateRaw = req.query.startDate;
+    const endDateRaw = req.query.endDate;
+
+    const userRole = (req.user && req.user.role) ? req.user.role.toLowerCase() : "";
+    const isOwner = userRole === "manager" || userRole === "owner";
+    const userReference = isOwner ? req.user.reference : null;
+
+    let accMatch = {};
+    if (userReference) accMatch.reference = userReference;
+    if (accommodationId) {
+      if (ObjectId.isValid(accommodationId)) {
+        accMatch._id = new ObjectId(accommodationId);
+      } else {
+        accMatch.id = accommodationId;
+      }
+    }
+
+    const matchedAccs = await accomodationsCol.find(accMatch, { projection: { _id: 1, id: 1 } }).toArray();
+    const strIds = matchedAccs.map(a => a._id.toString());
+    const objIds = matchedAccs.map(a => a._id);
+    const numIds = matchedAccs.map(a => a.id).filter(id => id != null);
+    const numStrIds = numIds.map(id => String(id));
+
+    let bookingMatch = (userReference || accommodationId) ? {
+      $or: [
+        { accomodationId: { $in: [...strIds, ...numStrIds] } },
+        { accommodationId: { $in: [...strIds, ...numStrIds] } },
+        { accomodationId: { $in: objIds } },
+        { accommodationId: { $in: objIds } },
+        { accomodationId: { $in: numIds } },
+        { accommodationId: { $in: numIds } }
+      ]
+    } : {};
+
+    // If bounded logic resulted in no matched accs, zero-out bookings match
+    if ((userReference || accommodationId) && matchedAccs.length === 0) {
+      bookingMatch._id = "impossible_match";
+    }
+
+    // Date Filters
+    let dateMatch = {};
+    if (startDateRaw || endDateRaw) {
+      dateMatch.createdAt = {};
+      if (startDateRaw) dateMatch.createdAt.$gte = new Date(startDateRaw);
+      if (endDateRaw) {
+        const d = new Date(endDateRaw);
+        d.setUTCHours(23, 59, 59, 999);
+        dateMatch.createdAt.$lte = d;
+      }
+    }
+
+    const totalAccommodations = await accomodationsCol.countDocuments(accMatch);
+    const totalUsers = isOwner ? 0 : await managementCol.countDocuments({});
+
+    const finalBookingMatch = { ...bookingMatch, ...dateMatch };
+    const totalBookings = await bookingsCol.countDocuments(finalBookingMatch);
     const pendingApprovals = await accomodationsCol.countDocuments({
+      ...accMatch,
       adminApproval: false,
     });
 
-    const topAmenitiesAgg = await accomodationsCol
+    const topRoomsAgg = await bookingsCol
       .aggregate([
-        { $unwind: "$amenities" },
+        { $match: finalBookingMatch },
         {
           $group: {
-            _id: "$amenities",
+            _id: "$roomName",
             count: { $sum: 1 },
           },
         },
@@ -1231,7 +1594,7 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
 
     const monthlyBookingsAgg = await bookingsCol
       .aggregate([
-        { $match: { createdAt: { $exists: true } } },
+        { $match: { ...finalBookingMatch, createdAt: { $exists: true } } },
         {
           $group: {
             _id: {
@@ -1246,8 +1609,27 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
       ])
       .toArray();
 
+    // Calculate Financial Revenue Trend
+    const monthlyRevenueAgg = await bookingsCol
+      .aggregate([
+        { $match: { ...finalBookingMatch, createdAt: { $exists: true }, status: { $nin: ["cancelled", "Cancelled", "rejected", "Rejected"] } } },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$createdAt" },
+              month: { $month: "$createdAt" },
+            },
+            revenue: { $sum: { $toDouble: { $ifNull: ["$totalAmount", 0] } } },
+          },
+        },
+        { $sort: { "_id.year": 1, "_id.month": 1 } },
+        { $limit: 12 },
+      ])
+      .toArray();
+
     const topAccommodationsAgg = await bookingsCol
       .aggregate([
+        { $match: finalBookingMatch },
         {
           $group: {
             _id: "$accomodationId",
@@ -1261,6 +1643,7 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
 
     const totalRoomsResult = await accomodationsCol
       .aggregate([
+        { $match: accMatch },
         {
           $project: {
             roomsCount: { $size: { $ifNull: ["$rooms", []] } },
@@ -1276,20 +1659,144 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
       .toArray();
     const totalRooms = totalRoomsResult[0]?.total || 0;
 
+    // Fast-calc for Total Revenue and Cancellation Rate
+    const performanceBookings = await bookingsCol.find(finalBookingMatch, { projection: { status: 1, totalAmount: 1, source: 1, checkIn: 1, checkOut: 1, from: 1, to: 1, nights: 1, createdAt: 1, paymentMethodUsed: 1, paymentMethod: 1 } }).toArray();
+    let totalRevenueSum = 0;
+    let failedCount = 0;
+    let sourceOnline = 0;
+    let sourceFrontDesk = 0;
+    let totalNightsSold = 0;
+
+    let totalLeadTimeDays = 0;
+    let leadTimeBookingsCount = 0;
+    let paymentMethodsCount = {};
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let checkInsToday = 0;
+    let checkOutsToday = 0;
+    let inHouse = 0;
+
+    for (const b of performanceBookings) {
+      const stat = String(b.status).toLowerCase();
+      if (stat === "cancelled" || stat === "rejected") {
+        failedCount++;
+      } else {
+        totalRevenueSum += Number(b.totalAmount) || 0;
+
+        if (b.source && String(b.source).toLowerCase() === 'management') {
+          sourceFrontDesk++;
+        } else {
+          sourceOnline++;
+        }
+
+        let nights = Number(b.nights) || 0;
+        if (nights === 0) {
+          const cInStr = b.checkIn || b.from;
+          const cOutStr = b.checkOut || b.to;
+          if (cInStr && cOutStr) {
+            const cIn = new Date(cInStr).getTime();
+            const cOut = new Date(cOutStr).getTime();
+            if (!isNaN(cIn) && !isNaN(cOut) && cOut > cIn) {
+              nights = Math.max(1, Math.round((cOut - cIn) / (1000 * 3600 * 24)));
+            }
+          }
+        }
+        if (nights < 1 && Object.keys(b).length > 2) nights = 1; // if fully formed booking
+        totalNightsSold += nights;
+
+        // Lead Time calculations
+        const cInStr = b.checkIn || b.from;
+        if (b.createdAt && cInStr) {
+          const createdDate = new Date(b.createdAt).getTime();
+          const cInDate = new Date(cInStr).getTime();
+          if (!isNaN(createdDate) && !isNaN(cInDate) && cInDate > createdDate) {
+            totalLeadTimeDays += (cInDate - createdDate) / (1000 * 3600 * 24);
+            leadTimeBookingsCount++;
+          }
+        }
+
+        // Payment Methods tracking
+        const pm = b.paymentMethodUsed || b.paymentMethod || "Unknown";
+        const standardPm = String(pm).trim().toLowerCase();
+        let label = "Other";
+        if (standardPm.includes('card') || standardPm.includes('stripe')) label = 'Credit / Debit';
+        else if (standardPm.includes('mobile') || standardPm.includes('m-pesa') || standardPm.includes('mpesa')) label = 'Mobile Money';
+        else if (standardPm.includes('cash')) label = 'Cash';
+        else if (standardPm.includes('bank')) label = 'Bank Transfer';
+        else if (standardPm !== "unknown") label = String(pm);
+
+        paymentMethodsCount[label] = (paymentMethodsCount[label] || 0) + 1;
+
+        // Operational Load calculations
+        const cOutStr = b.checkOut || b.to;
+        if (cInStr && cOutStr) {
+          const cInDateObj = new Date(cInStr);
+          const cOutDateObj = new Date(cOutStr);
+          cInDateObj.setHours(0, 0, 0, 0);
+          cOutDateObj.setHours(0, 0, 0, 0);
+
+          if (cInDateObj.getTime() === today.getTime()) checkInsToday++;
+          if (cOutDateObj.getTime() === today.getTime()) checkOutsToday++;
+          if (cInDateObj.getTime() <= today.getTime() && cOutDateObj.getTime() > today.getTime()) {
+            inHouse++;
+          }
+        }
+      }
+    }
+    const validBookingsCount = performanceBookings.length - failedCount;
+    const adr = totalNightsSold > 0 ? (totalRevenueSum / totalNightsSold) : 0;
+    const alos = validBookingsCount > 0 ? (totalNightsSold / validBookingsCount) : 0;
+    const cancellationRate = performanceBookings.length > 0 ? ((failedCount / performanceBookings.length) * 100).toFixed(1) : 0;
+
+    // Approximation of Occupancy. For actual occupancy you'd calculate against Room Count * Days in range
+    // Assuming 'Occupancy' here means "Number of valid bookings mapped out of potential capacity proxy".
+    // 1 booking per room per interval base:
+    const baseInterval = (startDateRaw && endDateRaw)
+      ? Math.max(1, (new Date(endDateRaw).getTime() - new Date(startDateRaw).getTime()) / (1000 * 3600 * 24))
+      : 30; // default proxy
+    let occupancyRate = totalRooms > 0 ? (((performanceBookings.length - failedCount) / (totalRooms * (baseInterval / 3))) * 100).toFixed(1) : 0;
+    if (Number(occupancyRate) > 100) occupancyRate = "100.0"; // clamp
+
+    const revpar = Number(adr) * (Number(occupancyRate) / 100);
+    const averageLeadTime = leadTimeBookingsCount > 0 ? (totalLeadTimeDays / leadTimeBookingsCount) : 0;
+
+    // Format payment methods for chart
+    const paymentMethodsArr = Object.keys(paymentMethodsCount).map(k => ({ label: k, count: paymentMethodsCount[k] })).sort((a, b) => b.count - a.count);
+
     res.json({
       status: "success",
       totalAccommodations,
       totalRooms,
       totalBookings,
       totalUsers,
+      totalRevenue: totalRevenueSum,
+      cancellationRate: Number(cancellationRate),
+      occupancyRate: Number(occupancyRate),
+      adr: Number(adr),
+      alos: Number(alos),
+      revpar: Number(revpar),
+      leadTime: Number(averageLeadTime),
+      operationLoad: {
+        checkInsToday,
+        checkOutsToday,
+        inHouse
+      },
+      paymentMethods: paymentMethodsArr,
+      sourceOnline,
+      sourceFrontDesk,
       pendingApprovals,
-      topAmenities: topAmenitiesAgg.map((item) => ({
-        name: item._id,
+      topRooms: topRoomsAgg.map((item) => ({
+        name: item._id || "Unknown Room",
         count: item.count,
       })),
       monthlyBookings: monthlyBookingsAgg.map((item) => ({
         label: `${item._id.month}/${item._id.year}`,
         count: item.count,
+      })),
+      monthlyRevenue: monthlyRevenueAgg.map((item) => ({
+        label: `${item._id.month}/${item._id.year}`,
+        revenue: item.revenue,
       })),
       topAccommodations: topAccommodationsAgg.map((item) => ({
         name: item._id || "Unknown",
@@ -1481,7 +1988,7 @@ router.post("/login", async (req, res, next) => {
       return res
         .status(401)
         .json({ error: "The email or password you entered is incorrect." });
-    if (admin.blocked)
+    if (admin.blocked || true)
       return res
         .status(403)
         .json({
@@ -1871,14 +2378,6 @@ router.put(
 
       // permission: admin or owner
       const userRole = (req.user.role || "").toLowerCase();
-      console.log(
-        "User role:",
-        userRole,
-        "User ID:",
-        req.user.id,
-        "Target ID:",
-        id,
-      );
       if (userRole !== "manager" && req.user.id !== id)
         return res
           .status(403)

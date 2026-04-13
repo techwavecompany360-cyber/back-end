@@ -47,8 +47,7 @@ router.post("/", async (req, res, next) => {
 router.post("/bookings", async (req, res, next) => {
   try {
     const bookingData = req.body;
-    console.log(bookingData);
-
+    console.log("=== INCOMING BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
     // Validate required fields
     if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
       return res
@@ -58,16 +57,17 @@ router.post("/bookings", async (req, res, next) => {
 
     const col = await mongo.getCollection("bookings");
 
-    // Check for overlapping bookings
+    const parsedCheckIn = new Date(bookingData.checkIn);
+    const parsedCheckOut = new Date(bookingData.checkOut);
+
+    // Check for overlapping bookings using Date-typed fields
+    // Exclude cancelled and checked-out bookings from overlap check
     const overlappingBookings = await col
       .find({
         roomId: bookingData.roomId,
-        $or: [
-          {
-            checkIn: { $lt: new Date(bookingData.checkOut) },
-            checkOut: { $gt: new Date(bookingData.checkIn) },
-          },
-        ],
+        status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
+        "bookingDates.checkIn": { $lt: parsedCheckOut },
+        "bookingDates.checkOut": { $gt: parsedCheckIn },
       })
       .toArray();
 
@@ -78,26 +78,61 @@ router.post("/bookings", async (req, res, next) => {
       });
     }
 
+    // Calculate platform fee info for online bookings
+    const totalBookingAmount = (parseFloat(bookingData.roomPrice) || 0) * (parseInt(bookingData.nights) || 1);
+    const platformFeeRate = 0.10; // 10% for client/online bookings
+    const platformFee = totalBookingAmount * platformFeeRate;
+    const hostShare = totalBookingAmount - platformFee;
+
     const newBooking = await col.insertOne({
       ...bookingData,
+      checkIn: parsedCheckIn,
+      checkOut: parsedCheckOut,
       bookingDates: {
-        checkIn: new Date(bookingData.checkIn),
-        checkOut: new Date(bookingData.checkOut),
+        checkIn: parsedCheckIn,
+        checkOut: parsedCheckOut,
       },
+      // Fee & wallet metadata
+      source: bookingData.source || "Client",
+      totalBookingAmount,
+      platformFee,
+      platformFeeRate,
+      hostShare,
+      walletAction: "credit",
       createdAt: new Date(),
     });
-    const col1 = await mongo.getCollection("accomodations");
-    await col1.updateOne(
-      { _id: new ObjectId(bookingData.accomodationId) },
-      {
-        $inc: {
-          "wallet.credit":
-            parseFloat(bookingData.roomPrice) *
-            parseInt(bookingData.nights) *
-            0.9,
-        },
-      },
-    );
+    // Credit accommodation wallet (90% of booking value — 10% platform fee for online bookings)
+    if (bookingData.accomodationId && hostShare > 0) {
+      try {
+        const col1 = await mongo.getCollection("accomodations");
+        await col1.updateOne(
+          { _id: new ObjectId(bookingData.accomodationId) },
+          {
+            $inc: {
+              "wallet.credit": hostShare,
+            },
+          },
+        );
+        // Record transaction
+        const txCol = await mongo.getCollection("wallet_transactions");
+        await txCol.insertOne({
+          accommodationId: bookingData.accomodationId,
+          type: "booking_credit",
+          description: `Online booking by ${bookingData.guestName || "Guest"}`,
+          amount: hostShare,
+          fee: platformFee,
+          feeRate: platformFeeRate,
+          grossAmount: totalBookingAmount,
+          source: "Client",
+          bookingId: newBooking.insertedId.toString(),
+          guestName: bookingData.guestName || "",
+          roomName: bookingData.roomName || "",
+          createdAt: new Date(),
+        });
+      } catch (walletErr) {
+        console.warn("Wallet credit failed for client booking:", walletErr);
+      }
+    }
     res.status(201).json({
       status: "success",
       message: "Booking created successfully",
@@ -216,15 +251,24 @@ router.get("/accomodations", async (req, res, next) => {
                         $expr: {
                           $eq: ["$roomId", "$$roomId"],
                         },
+                        status: { $nin: ["Cancelled", "cancelled", "Checked-Out", "checked-out"] },
                       },
                     },
                     {
                       $addFields: {
                         checkInDate: {
-                          $dateFromString: { dateString: "$checkIn" },
+                          $cond: {
+                            if: { $eq: [{ $type: "$checkIn" }, "date"] },
+                            then: "$checkIn",
+                            else: { $dateFromString: { dateString: { $toString: "$checkIn" } } }
+                          }
                         },
                         checkOutDate: {
-                          $dateFromString: { dateString: "$checkOut" },
+                          $cond: {
+                            if: { $eq: [{ $type: "$checkOut" }, "date"] },
+                            then: "$checkOut",
+                            else: { $dateFromString: { dateString: { $toString: "$checkOut" } } }
+                          }
                         },
                       },
                     },
@@ -275,7 +319,11 @@ router.get("/accomodations", async (req, res, next) => {
               {
                 $addFields: {
                   bookedDates: {
-                    $setUnion: "$bookings.dates",
+                    $reduce: {
+                      input: "$bookings.dates",
+                      initialValue: [],
+                      in: { $setUnion: ["$$value", "$$this"] }
+                    }
                   },
                 },
               },
@@ -324,9 +372,6 @@ router.get("/accomodations/type", async (req, res, next) => {
     const col = await mongo.getCollection("accomodations");
 
     const accomodationData = await col.find({}).toArray();
-
-    console.log(accomodationData);
-
     res.status(200).json({
       status: "success",
       accomodationData,
@@ -335,4 +380,7 @@ router.get("/accomodations/type", async (req, res, next) => {
     next(err);
   }
 });
+
+router.use("/reviews", require("./reviews"));
+
 module.exports = router;

@@ -31,7 +31,6 @@ router.get("/stats", async (req, res, next) => {
 router.post("/management/profile", authMiddleware, async (req, res, next) => {
   try {
     const ownerId = req.body.ownerId;
-    console.log("Owner ID:", ownerId);
     if (!ownerId) return res.status(400).json({ error: "ownerId is required" });
 
     const col = await mongo.getCollection("management");
@@ -165,13 +164,11 @@ router.post("/login", async (req, res, next) => {
         .json({ error: "Please provide both email and password." });
     const col = await mongo.getCollection("admin");
     const admin = await col.findOne({ email });
-    console.log(admin);
     if (!admin)
       return res
         .status(401)
         .json({ error: "The email or password you entered is incorrect." });
     const ok = await bcrypt.compare(password, admin.passwordHash);
-    console.log("Password match:", ok);
     if (!ok)
       return res
         .status(401)
@@ -195,7 +192,6 @@ router.get("/protected", authMiddleware, async (req, res, next) => {
 router.post("/accomodations/approve", async (req, res, next) => {
   try {
     const { accomodationId } = req.body;
-    console.log("Approving accommodation with ID:", accomodationId);
     const col = await mongo.getCollection("accomodations");
     const result = await col.updateOne(
       { _id: new ObjectId(accomodationId) },
@@ -212,7 +208,6 @@ router.post("/accomodations/approve", async (req, res, next) => {
 router.post("/accomodations/block", async (req, res, next) => {
   try {
     const { accomodationId } = req.body;
-    console.log("Approving accommodation with ID:", accomodationId);
     const col = await mongo.getCollection("accomodations");
     const result = await col.updateOne(
       { _id: new ObjectId(accomodationId) },
@@ -230,7 +225,6 @@ router.post("/accomodations/block", async (req, res, next) => {
 router.post("/accomodations/unblock", async (req, res, next) => {
   try {
     const { accomodationId } = req.body;
-    console.log("Approving accommodation with ID:", accomodationId);
     const col = await mongo.getCollection("accomodations");
     const result = await col.updateOne(
       { _id: new ObjectId(accomodationId) },
@@ -248,7 +242,6 @@ router.post("/accomodations/unblock", async (req, res, next) => {
 router.post("/room/approve", async (req, res, next) => {
   try {
     const { roomId } = req.body;
-    console.log("Approving room with ID:", roomId);
     const col = await mongo.getCollection("rooms");
     const result = await col.updateOne(
       { _id: new ObjectId(roomId) },
@@ -265,7 +258,6 @@ router.post("/room/approve", async (req, res, next) => {
 router.post("/room/reject", async (req, res, next) => {
   try {
     const { roomId } = req.body;
-    console.log("Approving room with ID:", roomId);
     const col = await mongo.getCollection("rooms");
     const result = await col.updateOne(
       { _id: new ObjectId(roomId) },
@@ -283,7 +275,6 @@ router.post("/room/reject", async (req, res, next) => {
 router.post("/room/block", async (req, res, next) => {
   try {
     const { roomId } = req.body;
-    console.log("Approving room with ID:", roomId);
     const col = await mongo.getCollection("rooms");
     const result = await col.updateOne(
       { _id: new ObjectId(roomId) },
@@ -300,7 +291,6 @@ router.post("/room/block", async (req, res, next) => {
 router.post("/room/unblock", async (req, res, next) => {
   try {
     const { roomId } = req.body;
-    console.log("Unblocking room with ID:", roomId);
     const col = await mongo.getCollection("rooms");
     const result = await col.updateOne(
       { _id: new ObjectId(roomId) },
