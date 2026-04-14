@@ -45,6 +45,9 @@ router.post("/", async (req, res, next) => {
 });
 
 router.post("/bookings", async (req, res, next) => {
+  return res
+    .status(400)
+    .json({ error: "this part is under development  " });
   try {
     const bookingData = req.body;
     // console.log("=== INCOMING BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
