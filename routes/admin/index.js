@@ -20,9 +20,31 @@ router.get("/stats", async (req, res, next) => {
   try {
     const itemsCol = await mongo.getCollection("items");
     const clientsCol = await mongo.getCollection("clients");
+    const accomodationsCol = await mongo.getCollection("accomodations");
+    const managementCol = await mongo.getCollection("management");
+    const bookingsCol = await mongo.getCollection("bookings");
+    
     const items = await itemsCol.countDocuments();
     const clients = await clientsCol.countDocuments();
-    res.json({ users: clients, items, uptime: process.uptime() });
+    const accomodations = await accomodationsCol.countDocuments();
+    const owners = await managementCol.countDocuments({ owner: true });
+    const bookings = await bookingsCol.countDocuments();
+    
+    // Minimal mock time-series data for chart preview on dashboard
+    const chartData = {
+      labels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+      data: [12, 19, 3, 5, 2, 3, 7]
+    };
+
+    res.json({ 
+      users: clients, 
+      items, 
+      accomodations, 
+      owners, 
+      bookings, 
+      chartData,
+      uptime: process.uptime() 
+    });
   } catch (err) {
     next(err);
   }
@@ -184,6 +206,41 @@ router.post("/login", async (req, res, next) => {
 router.get("/protected", authMiddleware, async (req, res, next) => {
   try {
     res.json({ msg: "protected admin data", user: req.user });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/accomodations", async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("accomodations");
+    const accomodations = await col.find({}).toArray();
+    res.status(200).json(accomodations);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/bookings", async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("bookings");
+    const bookings = await col.find({}).toArray();
+    res.status(200).json(bookings);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/clients", async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("clients");
+    const clients = await col.find({}).toArray();
+    // Exclude password hashes for security
+    const sanitizedClients = clients.map(client => {
+      const { passwordHash, ...safeData } = client;
+      return safeData;
+    });
+    res.status(200).json(sanitizedClients);
   } catch (err) {
     next(err);
   }

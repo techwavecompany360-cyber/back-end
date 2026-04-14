@@ -32,7 +32,7 @@ const upload = multer({
       cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
     },
   }),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  limits: { fileSize: 2000 * 1024 * 1024 }, // 10MB limit
   fileFilter: (req, file, cb) => {
     const allowedMimes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
     if (allowedMimes.includes(file.mimetype)) {
@@ -64,7 +64,7 @@ const documentStorage = multer.diskStorage({
 const documentUpload = multer({
   storage: documentStorage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB
+    fileSize: 2000 * 1024 * 1024, // 5MB
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype === "application/pdf") {
