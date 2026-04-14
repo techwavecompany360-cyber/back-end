@@ -42,6 +42,18 @@ router.post("/", async (req, res, next) => {
       return res.status(400).json({ error: "rating must be between 1 and 5" });
     }
 
+    // Ensure only Homestays can receive reviews
+    const accCol = await mongo.getCollection("accomodations");
+    const accommodation = await accCol.findOne({ _id: new ObjectId(accommodationId) });
+    
+    if (!accommodation) {
+      return res.status(404).json({ error: "Accommodation not found" });
+    }
+
+    if (accommodation.type?.toLowerCase() !== "homestay") {
+      return res.status(403).json({ error: "Reviews are only allowed for Homestay properties" });
+    }
+
     const col = await mongo.getCollection("reviews");
     const newReview = {
       accommodationId,

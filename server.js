@@ -29,7 +29,7 @@ app.get("/view-pdf/:filename", (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(__dirname, "public/uploads/documents", filename);
 
-  console.log("Serving PDF file from:", filePath);
+  // console.log("Serving PDF file from:", filePath);
 
   res.sendFile(filePath, {
     headers: {
@@ -162,7 +162,7 @@ app.use((err, req, res, next) => {
 
 if (require.main === module) {
   app.listen(port, () => {
-    console.log(`Server listening on http://localhost:${port}`);
+    // console.log(`Server listening on http://localhost:${port}`);
   });
 }
 

@@ -47,7 +47,7 @@ router.post("/", async (req, res, next) => {
 router.post("/bookings", async (req, res, next) => {
   try {
     const bookingData = req.body;
-    console.log("=== INCOMING BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
+    // console.log("=== INCOMING BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
     // Validate required fields
     if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
       return res
@@ -130,7 +130,7 @@ router.post("/bookings", async (req, res, next) => {
           createdAt: new Date(),
         });
       } catch (walletErr) {
-        console.warn("Wallet credit failed for client booking:", walletErr);
+        // console.warn("Wallet credit failed for client booking:", walletErr);
       }
     }
     res.status(201).json({

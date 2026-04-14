@@ -193,12 +193,31 @@ router.post("/accomodations/approve", async (req, res, next) => {
   try {
     const { accomodationId } = req.body;
     const col = await mongo.getCollection("accomodations");
+
+    const acc = await col.findOne({ _id: new ObjectId(accomodationId) });
+    if (!acc) {
+      return res.status(404).json({ error: "Accommodation not found" });
+    }
+
     const result = await col.updateOne(
       { _id: new ObjectId(accomodationId) },
       { $set: { adminApproval: true, rejected: false, status: "approved" } },
     );
+
+    let message = "Accommodation approved successfully";
+
+    // Automatically approve associated rooms ONLY for Homestays
+    if (acc.type && acc.type.toLowerCase() === "homestay") {
+      const roomsCol = await mongo.getCollection("rooms");
+      await roomsCol.updateMany(
+        { accomodationReference: accomodationId },
+        { $set: { adminApproval: true, rejected: false, status: "approved" } }
+      );
+      message = "Accommodation and associated homestay rooms approved successfully";
+    }
+
     res.status(200).json({
-      message: "Accommodation approved successfully",
+      message,
       result,
     });
   } catch (err) {

@@ -231,7 +231,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error("Registration error:", error);
+      // console.error("Registration error:", error);
       res.status(500).json({
         message: error.message || "Registration failed",
       });
@@ -561,7 +561,7 @@ router.post(
         // Wallet
         wallet,
         // Homestay specifics
-        ...(finalPayload.type === "homestay" && {
+        ...(finalPayload.type && finalPayload.type.toLowerCase() === "homestay" && {
           hostBio: finalPayload.hostBio,
           languagesSpoken: finalPayload.languagesSpoken,
           houseRules: finalPayload.houseRules,
@@ -581,7 +581,7 @@ router.post(
       const result = await col.insertOne(accommodationRecord);
 
       // Virtual Room integration for Homestays
-      if (finalPayload.type === "homestay") {
+      if (finalPayload.type && finalPayload.type.toLowerCase() === "homestay") {
         const roomsCol = await mongo.getCollection("rooms");
         await roomsCol.insertOne({
           roomName: "Entire Home",
@@ -610,7 +610,7 @@ router.post(
         adminApprovalRequired: true,
       });
     } catch (error) {
-      console.error("Accommodation registration error:", error);
+      // console.error("Accommodation registration error:", error);
       res.status(500).json({
         message: error.message || "Accommodation registration failed",
       });
@@ -980,10 +980,10 @@ router.get("/accomodations/rooms", requireAuth, async (req, res, next) => {
 router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
   try {
     const bookingData = req.body;
-    console.log(
-      "=== INCOMING MANAGEMENT BOOKING DATA ===",
-      JSON.stringify(bookingData, null, 2),
-    );
+    // console.log(
+    //   "=== INCOMING MANAGEMENT BOOKING DATA ===",
+    //   JSON.stringify(bookingData, null, 2),
+    // );
 
     // Validate required fields
     if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
@@ -1072,7 +1072,7 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
           createdAt: new Date(),
         });
       } catch (walletErr) {
-        console.warn("Wallet debit failed for management booking:", walletErr);
+        // console.warn("Wallet debit failed for management booking:", walletErr);
       }
     }
 
@@ -1396,7 +1396,7 @@ router.post(
             createdAt: new Date(),
           });
         } catch (txErr) {
-          console.warn("Failed to record withdrawal transaction:", txErr);
+          // console.warn("Failed to record withdrawal transaction:", txErr);
         }
 
         return res.status(200).json({
@@ -1518,7 +1518,7 @@ router.post(
           createdAt: new Date(),
         });
       } catch (txErr) {
-        console.warn("Failed to record debit payment transaction:", txErr);
+        // console.warn("Failed to record debit payment transaction:", txErr);
       }
 
       return res.status(200).json({
@@ -1597,15 +1597,15 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
     let bookingMatch =
       userReference || accommodationId
         ? {
-            $or: [
-              { accomodationId: { $in: [...strIds, ...numStrIds] } },
-              { accommodationId: { $in: [...strIds, ...numStrIds] } },
-              { accomodationId: { $in: objIds } },
-              { accommodationId: { $in: objIds } },
-              { accomodationId: { $in: numIds } },
-              { accommodationId: { $in: numIds } },
-            ],
-          }
+          $or: [
+            { accomodationId: { $in: [...strIds, ...numStrIds] } },
+            { accommodationId: { $in: [...strIds, ...numStrIds] } },
+            { accomodationId: { $in: objIds } },
+            { accommodationId: { $in: objIds } },
+            { accomodationId: { $in: numIds } },
+            { accommodationId: { $in: numIds } },
+          ],
+        }
         : {};
 
     // If bounded logic resulted in no matched accs, zero-out bookings match
@@ -1852,19 +1852,19 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
     const baseInterval =
       startDateRaw && endDateRaw
         ? Math.max(
-            1,
-            (new Date(endDateRaw).getTime() -
-              new Date(startDateRaw).getTime()) /
-              (1000 * 3600 * 24),
-          )
+          1,
+          (new Date(endDateRaw).getTime() -
+            new Date(startDateRaw).getTime()) /
+          (1000 * 3600 * 24),
+        )
         : 30; // default proxy
     let occupancyRate =
       totalRooms > 0
         ? (
-            ((performanceBookings.length - failedCount) /
-              (totalRooms * (baseInterval / 3))) *
-            100
-          ).toFixed(1)
+          ((performanceBookings.length - failedCount) /
+            (totalRooms * (baseInterval / 3))) *
+          100
+        ).toFixed(1)
         : 0;
     if (Number(occupancyRate) > 100) occupancyRate = "100.0"; // clamp
 
@@ -2082,7 +2082,7 @@ router.put(
         user: safe,
       });
     } catch (err) {
-      console.error("Error in PUT /newUser/:id:", err);
+      // console.error("Error in PUT /newUser/:id:", err);
       next(err);
     }
   },
@@ -2105,7 +2105,7 @@ router.post("/login", async (req, res, next) => {
       return res.status(403).json({
         error: "Your account has been suspended. Please contact support.",
       });
-    if (false && admin.adminApproval === false)
+    if (admin.adminApproval === false)
       return res.status(403).json({
         error: "Your account is pending approval. Please check back later.",
       });
@@ -2582,7 +2582,7 @@ router.get(
       const available = overlappingBookings.length === 0;
       res.json({ available });
     } catch (error) {
-      console.error("Error checking availability:", error);
+      // console.error("Error checking availability:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   },
