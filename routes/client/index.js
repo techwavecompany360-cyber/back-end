@@ -81,9 +81,11 @@ router.post("/bookings", async (req, res, next) => {
       });
     }
 
-    // Calculate platform fee info for online bookings
+    // Calculate platform fee info for online bookings — rate from system config
     const totalBookingAmount = (parseFloat(bookingData.roomPrice) || 0) * (parseInt(bookingData.nights) || 1);
-    const platformFeeRate = 0.10; // 10% for client/online bookings
+    const configCol = await mongo.getCollection("system_config");
+    const feeConfig = await configCol.findOne({ _id: "platform_fees" });
+    const platformFeeRate = feeConfig?.clientFeeRate ?? 0.10; // default 10%
     const platformFee = totalBookingAmount * platformFeeRate;
     const hostShare = totalBookingAmount - platformFee;
 
@@ -374,7 +376,7 @@ router.get("/accomodations/type", async (req, res, next) => {
   try {
     const col = await mongo.getCollection("accomodations");
 
-    const accomodationData = await col.find({}).toArray();
+    const accomodationData = await col.find({ adminApproval: true, blocked: { $ne: true } }).toArray();
     res.status(200).json({
       status: "success",
       accomodationData,

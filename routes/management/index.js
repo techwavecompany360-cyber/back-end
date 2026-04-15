@@ -75,6 +75,20 @@ const documentUpload = multer({
   },
 });
 
+// Fee configuration (read-only for management UI)
+router.get("/fee-config", requireAuth, async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("system_config");
+    const config = await col.findOne({ _id: "platform_fees" });
+    res.status(200).json({
+      clientFeeRate: config?.clientFeeRate ?? 0.10,
+      managementFeeRate: config?.managementFeeRate ?? 0.01,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Management registration
 router.post(
   "/register",
@@ -1017,11 +1031,13 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
       });
     }
 
-    // Calculate platform fee info for management bookings
+    // Calculate platform fee info for management bookings — rate from system config
     const totalBookingAmount =
       (parseFloat(bookingData.roomPrice) || 0) *
       (parseInt(bookingData.nights) || 1);
-    const platformFeeRate = 0.01; // 1% for management bookings
+    const configCol = await mongo.getCollection("system_config");
+    const feeConfig = await configCol.findOne({ _id: "platform_fees" });
+    const platformFeeRate = feeConfig?.managementFeeRate ?? 0.01; // default 1%
     const platformFee = totalBookingAmount * platformFeeRate;
     const hostShare = totalBookingAmount - platformFee;
 
@@ -2105,10 +2121,7 @@ router.post("/login", async (req, res, next) => {
       return res.status(403).json({
         error: "Your account has been suspended. Please contact support.",
       });
-    if (admin.adminApproval === false)
-      return res.status(403).json({
-        error: "Your account is pending approval. Please check back later.",
-      });
+
     const ok = await bcrypt.compare(password, admin.passwordHash);
     if (!ok)
       return res
@@ -2359,10 +2372,7 @@ async function requireAuth(req, res, next) {
       return res.status(403).json({
         error: "Your account has been suspended. Please contact support.",
       });
-    if (user.adminApproval === false)
-      return res.status(403).json({
-        error: "Your account is pending approval. Please check back later.",
-      });
+
 
     const normalizedRole = (user.role || "user").toString().toLowerCase();
     req.user = {
