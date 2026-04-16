@@ -118,6 +118,40 @@ router.post(
     }
   },
 );
+
+router.post(
+  "/management/owner/:id/reset-password",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const { password } = req.body;
+
+      if (!password) {
+        return res.status(400).json({ error: "Password is required" });
+      }
+
+      const col = await mongo.getCollection("management");
+      const owner = await col.findOne({ _id: new ObjectId(id), owner: true });
+
+      if (!owner) {
+        return res.status(404).json({ error: "Owner not found" });
+      }
+
+      const salt = await bcrypt.genSalt(10);
+      const passwordHash = await bcrypt.hash(password, salt);
+
+      await col.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { passwordHash, updatedAt: new Date() } }
+      );
+
+      res.status(200).json({ message: "Password reset successfully" });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 router.get(
   "/management/owner/accomodations",
   authMiddleware,
@@ -220,6 +254,32 @@ router.post("/login", async (req, res, next) => {
         .json({ error: "The email or password you entered is incorrect." });
     const token = sign({ email: admin.email, id: admin.id, role: "admin" });
     res.json({ token });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Admin change password
+router.post("/change-password", authMiddleware, async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "Current and new password are required" });
+    }
+    const col = await mongo.getCollection("admin");
+    const admin = await col.findOne({ id: req.user.id });
+    if (!admin) return res.status(404).json({ error: "Admin not found" });
+
+    const ok = await bcrypt.compare(currentPassword, admin.passwordHash);
+    if (!ok) return res.status(400).json({ error: "Incorrect current password." });
+
+    if (newPassword.length < 6) return res.status(400).json({ error: "New password must be at least 6 characters." });
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(newPassword, salt);
+    await col.updateOne({ id: req.user.id }, { $set: { passwordHash } });
+
+    res.json({ message: "Password updated successfully." });
   } catch (err) {
     next(err);
   }

@@ -75,8 +75,47 @@ const documentUpload = multer({
   },
 });
 
+// Change password
+router.put(
+  "/change-password",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const { oldPassword, newPassword } = req.body;
+      if (!oldPassword || !newPassword) {
+        return res.status(400).json({ error: "Both old and new password are required" });
+      }
+
+      if (oldPassword === newPassword) {
+        return res.status(400).json({ error: "New password cannot be the same as the old password" });
+      }
+
+      const col = await mongo.getCollection("management");
+      const user = await col.findOne({ email: req.user.email });
+      
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      const isMatch = await bcrypt.compare(oldPassword, user.passwordHash);
+      if (!isMatch) {
+        return res.status(401).json({ error: "Incorrect current password" });
+      }
+      
+      const salt = await bcrypt.genSalt(10);
+      const passwordHash = await bcrypt.hash(newPassword, salt);
+      
+      await col.updateOne({ _id: user._id }, { $set: { passwordHash } });
+      
+      res.json({ message: "Password updated successfully" });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 // Fee configuration (read-only for management UI)
-router.get("/fee-config", requireAuth, async (req, res, next) => {
+router.get("/fee-config", authMiddleware, async (req, res, next) => {
   try {
     const col = await mongo.getCollection("system_config");
     const config = await col.findOne({ _id: "platform_fees" });
@@ -2059,6 +2098,18 @@ router.put(
         return res.status(404).json({ error: "User not found" });
       }
 
+      // Owner protections
+      if (user.owner) {
+        // Owner accounts can only be edited by the owner themselves
+        if (req.user.id !== user._id.toString() && req.user.id !== user.id?.toString()) {
+          return res.status(403).json({ error: "Owner account can only be edited by the owner themselves." });
+        }
+        // Owner accounts cannot be blocked
+        if (typeof blocked !== "undefined" && blocked !== user.blocked) {
+          return res.status(403).json({ error: "Owner account cannot be blocked." });
+        }
+      }
+
       // Check for duplicate email (if email is being changed)
       if (email && email !== user.email) {
         const emailQuery = { email };
@@ -2102,6 +2153,40 @@ router.put(
       next(err);
     }
   },
+);
+
+// DELETE /management/newUser/:id
+router.delete(
+  "/newUser/:id",
+  requireAuth,
+  requireRole("manager"),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const col = await mongo.getCollection("management");
+
+      let query = {};
+      if (ObjectId.isValid(id)) {
+        query = { _id: new ObjectId(id) };
+      } else {
+        query = { id: parseInt(id) };
+      }
+
+      const user = await col.findOne(query);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (user.owner) {
+        return res.status(403).json({ error: "Owner account cannot be deleted." });
+      }
+
+      await col.deleteOne(query);
+      res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  }
 );
 
 router.post("/login", async (req, res, next) => {
