@@ -847,4 +847,102 @@ router.post(
   }
 );
 
+// ──────── Change Front Image ────────
+
+// Swap accommodation front image with one of the other images
+router.post(
+  "/accomodation/:id/change-front-image",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const accId = req.params.id;
+      const { newFrontImage } = req.body;
+
+      if (!newFrontImage) {
+        return res.status(400).json({ error: "newFrontImage is required" });
+      }
+
+      const col = await mongo.getCollection("accomodations");
+      const acc = await col.findOne({ _id: new ObjectId(accId) });
+      if (!acc) return res.status(404).json({ error: "Accommodation not found" });
+
+      const otherImages = Array.isArray(acc.otherImages) ? [...acc.otherImages] : [];
+      const oldFrontImage = acc.frontImage || null;
+
+      // Remove the selected image from otherImages
+      const idx = otherImages.indexOf(newFrontImage);
+      if (idx === -1) {
+        return res.status(400).json({ error: "Selected image not found in other images" });
+      }
+      otherImages.splice(idx, 1);
+
+      // Put the old front image into otherImages (if it exists)
+      if (oldFrontImage) {
+        otherImages.unshift(oldFrontImage);
+      }
+
+      await col.updateOne(
+        { _id: new ObjectId(accId) },
+        { $set: { frontImage: newFrontImage, otherImages } }
+      );
+
+      res.status(200).json({
+        message: "Front image updated successfully",
+        frontImage: newFrontImage,
+        otherImages,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Swap room front image with one of the other images
+router.post(
+  "/room/:id/change-front-image",
+  authMiddleware,
+  async (req, res, next) => {
+    try {
+      const roomId = req.params.id;
+      const { newFrontImage } = req.body;
+
+      if (!newFrontImage) {
+        return res.status(400).json({ error: "newFrontImage is required" });
+      }
+
+      const col = await mongo.getCollection("rooms");
+      const room = await col.findOne({ _id: new ObjectId(roomId) });
+      if (!room) return res.status(404).json({ error: "Room not found" });
+
+      const otherImages = Array.isArray(room.otherImages) ? [...room.otherImages] : [];
+      const oldFrontImage = room.frontImage || null;
+
+      // Remove the selected image from otherImages
+      const idx = otherImages.indexOf(newFrontImage);
+      if (idx === -1) {
+        return res.status(400).json({ error: "Selected image not found in other images" });
+      }
+      otherImages.splice(idx, 1);
+
+      // Put the old front image into otherImages (if it exists)
+      if (oldFrontImage) {
+        otherImages.unshift(oldFrontImage);
+      }
+
+      await col.updateOne(
+        { _id: new ObjectId(roomId) },
+        { $set: { frontImage: newFrontImage, otherImages } }
+      );
+
+      res.status(200).json({
+        message: "Room front image updated successfully",
+        frontImage: newFrontImage,
+        otherImages,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;

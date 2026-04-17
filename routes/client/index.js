@@ -3,6 +3,12 @@ const router = express.Router();
 const mongo = require("../../lib/mongo");
 const { authMiddleware } = require("../../lib/auth");
 const { ObjectId } = require("mongodb");
+const axios = require("axios");
+
+// ── Microservice URLs ──
+const SMS_API = process.env.SMS_API_URL || "http://localhost:4001";
+const PAYMENT_API = process.env.PAYMENT_API_URL || "http://localhost:4002";
+const EMAIL_API = process.env.EMAIL_API_URL || "http://localhost:4003";
 
 // List clients
 router.get("/", async (req, res, next) => {
@@ -45,12 +51,9 @@ router.post("/", async (req, res, next) => {
 });
 
 router.post("/bookings", async (req, res, next) => {
-  return res
-    .status(400)
-    .json({ error: "this part is under development  " });
   try {
     const bookingData = req.body;
-    // console.log("=== INCOMING BOOKING DATA ===", JSON.stringify(bookingData, null, 2));
+
     // Validate required fields
     if (!bookingData.roomId || !bookingData.checkIn || !bookingData.checkOut) {
       return res
@@ -58,13 +61,18 @@ router.post("/bookings", async (req, res, next) => {
         .json({ error: "Missing required fields: roomId, checkIn, checkOut" });
     }
 
+    if (!bookingData.guestName || !bookingData.email || !bookingData.phone) {
+      return res
+        .status(400)
+        .json({ error: "Missing required fields: guestName, email, phone" });
+    }
+
     const col = await mongo.getCollection("bookings");
 
     const parsedCheckIn = new Date(bookingData.checkIn);
     const parsedCheckOut = new Date(bookingData.checkOut);
 
-    // Check for overlapping bookings using Date-typed fields
-    // Exclude cancelled and checked-out bookings from overlap check
+    // Check for overlapping bookings
     const overlappingBookings = await col
       .find({
         roomId: bookingData.roomId,
@@ -76,16 +84,60 @@ router.post("/bookings", async (req, res, next) => {
 
     if (overlappingBookings.length > 0) {
       return res.status(409).json({
-        error:
-          "Booking conflict: The selected dates are already booked for this room",
+        error: "Booking conflict: The selected dates are already booked for this room",
       });
     }
 
-    // Calculate platform fee info for online bookings — rate from system config
+    // ── Step 1: Process Payment via Payment API ──
+    let paymentResult = null;
+    try {
+      const paymentMethod = bookingData.paymentMethod || "card";
+      let apiMethod = "card";
+      if (paymentMethod.toLowerCase().includes("mpesa") || paymentMethod.toLowerCase().includes("m-pesa")) apiMethod = "mpesa";
+      else if (paymentMethod.toLowerCase().includes("tigo")) apiMethod = "tigopesa";
+      else if (paymentMethod.toLowerCase().includes("airtel")) apiMethod = "airtelmoney";
+      else if (paymentMethod.toLowerCase().includes("mobile")) {
+        // Extract network from paymentMethod string like "Mobile Money (mpesa)"
+        const match = paymentMethod.match(/\((\w+)\)/i);
+        apiMethod = match ? match[1].toLowerCase() : "mpesa";
+      }
+
+      const paymentPayload = {
+        amount: bookingData.totalAmount || bookingData.amountPaid || 0,
+        currency: "TZS",
+        method: apiMethod,
+        phone: bookingData.paymentPhone || bookingData.phone,
+        description: `Booking ${bookingData.bookingId} — ${bookingData.accomodationName || "ReM360"}`,
+        metadata: {
+          bookingId: bookingData.bookingId,
+          guestName: bookingData.guestName,
+          roomId: bookingData.roomId,
+        },
+      };
+
+      const payRes = await axios.post(`${PAYMENT_API}/api/payment/initiate`, paymentPayload, { timeout: 15000 });
+      paymentResult = payRes.data;
+
+      if (!paymentResult.success) {
+        return res.status(402).json({
+          error: "Payment failed. Please try again.",
+          paymentError: paymentResult.error || "Unknown payment error",
+        });
+      }
+    } catch (payErr) {
+      const errMsg = payErr?.response?.data?.error || payErr.message || "Payment service unavailable";
+      console.error("Payment API error:", errMsg);
+      return res.status(502).json({
+        error: "Payment processing failed",
+        details: errMsg,
+      });
+    }
+
+    // ── Step 2: Calculate fees & Save Booking ──
     const totalBookingAmount = (parseFloat(bookingData.roomPrice) || 0) * (parseInt(bookingData.nights) || 1);
     const configCol = await mongo.getCollection("system_config");
     const feeConfig = await configCol.findOne({ _id: "platform_fees" });
-    const platformFeeRate = feeConfig?.clientFeeRate ?? 0.10; // default 10%
+    const platformFeeRate = feeConfig?.clientFeeRate ?? 0.10;
     const platformFee = totalBookingAmount * platformFeeRate;
     const hostShare = totalBookingAmount - platformFee;
 
@@ -97,28 +149,27 @@ router.post("/bookings", async (req, res, next) => {
         checkIn: parsedCheckIn,
         checkOut: parsedCheckOut,
       },
-      // Fee & wallet metadata
       source: bookingData.source || "Client",
       totalBookingAmount,
       platformFee,
       platformFeeRate,
       hostShare,
       walletAction: "credit",
+      // Payment API metadata
+      paymentTransactionId: paymentResult?.transactionId || null,
+      paymentReceiptNumber: paymentResult?.receiptNumber || null,
+      paymentStatus: paymentResult?.status || "completed",
       createdAt: new Date(),
     });
-    // Credit accommodation wallet (90% of booking value — 10% platform fee for online bookings)
+
+    // ── Step 3: Credit accommodation wallet ──
     if (bookingData.accomodationId && hostShare > 0) {
       try {
         const col1 = await mongo.getCollection("accomodations");
         await col1.updateOne(
           { _id: new ObjectId(bookingData.accomodationId) },
-          {
-            $inc: {
-              "wallet.credit": hostShare,
-            },
-          },
+          { $inc: { "wallet.credit": hostShare } },
         );
-        // Record transaction
         const txCol = await mongo.getCollection("wallet_transactions");
         await txCol.insertOne({
           accommodationId: bookingData.accomodationId,
@@ -132,16 +183,51 @@ router.post("/bookings", async (req, res, next) => {
           bookingId: newBooking.insertedId.toString(),
           guestName: bookingData.guestName || "",
           roomName: bookingData.roomName || "",
+          paymentTransactionId: paymentResult?.transactionId || null,
           createdAt: new Date(),
         });
       } catch (walletErr) {
-        // console.warn("Wallet credit failed for client booking:", walletErr);
+        console.warn("Wallet credit failed for client booking:", walletErr.message);
       }
     }
+
+    // ── Step 4: Send Confirmation SMS (async, non-blocking) ──
+    axios.post(`${SMS_API}/api/sms/booking-confirmation`, {
+      phone: bookingData.phone,
+      guestName: bookingData.guestName,
+      bookingId: bookingData.bookingId,
+      checkIn: bookingData.checkIn,
+      checkOut: bookingData.checkOut,
+      propertyName: bookingData.accomodationName,
+      total: totalBookingAmount,
+    }, { timeout: 5000 }).catch(err => {
+      console.warn("SMS confirmation failed (non-critical):", err.message);
+    });
+
+    // ── Step 5: Send Confirmation Email (async, non-blocking) ──
+    axios.post(`${EMAIL_API}/api/email/booking-confirmation`, {
+      to: bookingData.email,
+      guestName: bookingData.guestName,
+      bookingId: bookingData.bookingId,
+      propertyName: bookingData.accomodationName,
+      roomName: bookingData.roomName,
+      checkIn: bookingData.checkIn,
+      checkOut: bookingData.checkOut,
+      nights: bookingData.nights,
+      guests: `${bookingData.adults || 1} adult(s)${bookingData.children ? `, ${bookingData.children} child(ren)` : ""}`,
+      total: totalBookingAmount,
+      paymentMethod: bookingData.paymentMethodUsed || bookingData.paymentMethod,
+    }, { timeout: 10000 }).catch(err => {
+      console.warn("Email confirmation failed (non-critical):", err.message);
+    });
+
     res.status(201).json({
       status: "success",
       message: "Booking created successfully",
       bookingId: newBooking.insertedId,
+      bookingRef: bookingData.bookingId,
+      paymentTransactionId: paymentResult?.transactionId,
+      paymentReceiptNumber: paymentResult?.receiptNumber,
     });
   } catch (err) {
     next(err);
