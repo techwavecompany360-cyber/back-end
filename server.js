@@ -1,11 +1,25 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 
 const helmet = require("helmet");
 const path = require("path");
+const http = require("http");
+const { Server } = require("socket.io");
+
 const app = express();
 const port = process.env.PORT || 3001;
+const server = http.createServer(app);
+
+// Initialize Socket.io
+const io = new Server(server, {
+  cors: {
+    origin: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: true,
+  },
+});
 
 // Middleware
 app.use(
@@ -74,9 +88,11 @@ app.get("/health", (req, res) => {
 const adminRouter = require("./routes/admin/index");
 const clientRouter = require("./routes/client/index");
 const managementRouter = require("./routes/management/index");
+const analyticsRouter = require("./routes/client/analytics");
 
 app.use("/admin", adminRouter);
 app.use("/client", clientRouter);
+app.use("/client/analytics", analyticsRouter);
 app.use("/management", managementRouter);
 
 // mount users router under management
@@ -160,10 +176,117 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal Server Error" });
 });
 
+// --- Socket.io Chat Implementation ---
+io.on("connection", (socket) => {
+  // console.log("Client connected to socket:", socket.id);
+
+  socket.on("join_room", (room) => {
+    socket.join(room);
+    // console.log(`Socket ${socket.id} joined room ${room}`);
+  });
+
+  socket.on("send_message", async (data) => {
+    const { room, senderType, senderId, text, accommodationId, clientId } = data;
+    if (!room || !text || !senderType) return;
+
+    try {
+      const messagesCol = await mongo.getCollection("messages");
+      const messageDoc = {
+        room,
+        accommodationId,
+        clientId,
+        senderType, // 'client' or 'management'
+        senderId,
+        text,
+        createdAt: new Date(),
+        read: false
+      };
+      await messagesCol.insertOne(messageDoc);
+      
+      // Broadcast to everyone in the room (client + manager looking at this room)
+      io.to(room).emit("receive_message", messageDoc);
+      
+      // Notify the management inbox generally so it updates unread counts
+      if (accommodationId && senderType === 'client') {
+          io.to(`management_${accommodationId}`).emit("new_inbox_message", messageDoc);
+      }
+    } catch (err) {
+      console.error("Error saving message:", err);
+    }
+  });
+
+  // --- Admin ↔ Management Chat ---
+  socket.on("join_admin_room", (room) => {
+    socket.join(room);
+  });
+
+  socket.on("send_admin_message", async (data) => {
+    const { room, senderType, senderId, senderName, senderRole, senderRef, text, managementUserId } = data;
+    if (!room || !text || !senderType) return;
+
+    try {
+      const messagesCol = await mongo.getCollection("admin_messages");
+      const messageDoc = {
+        room,
+        managementUserId,
+        senderType,
+        senderId,
+        senderName: senderName || (senderType === "admin" ? "Admin" : "Manager"),
+        senderRole: senderRole || senderType,
+        senderRef: senderRef || "",
+        text,
+        createdAt: new Date(),
+        status: "sent",
+      };
+      await messagesCol.insertOne(messageDoc);
+
+      io.to(room).emit("receive_admin_message", messageDoc);
+    } catch (err) {
+      console.error("Error saving admin message:", err);
+    }
+  });
+
+  // Mark messages as delivered
+  socket.on("admin_msg_delivered", async (data) => {
+    const { room, senderType } = data;
+    if (!room) return;
+    try {
+      const messagesCol = await mongo.getCollection("admin_messages");
+      await messagesCol.updateMany(
+        { room, senderType, status: "sent" },
+        { $set: { status: "delivered" } }
+      );
+      io.to(room).emit("admin_status_update", { room, senderType, newStatus: "delivered" });
+    } catch (err) {
+      console.error("Error marking delivered:", err);
+    }
+  });
+
+  // Mark messages as read
+  socket.on("admin_msg_read", async (data) => {
+    const { room, senderType } = data;
+    if (!room) return;
+    try {
+      const messagesCol = await mongo.getCollection("admin_messages");
+      await messagesCol.updateMany(
+        { room, senderType, status: { $ne: "read" } },
+        { $set: { status: "read" } }
+      );
+      io.to(room).emit("admin_status_update", { room, senderType, newStatus: "read" });
+    } catch (err) {
+      console.error("Error marking read:", err);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    // console.log("Client disconnected:", socket.id);
+  });
+});
+
 if (require.main === module) {
-  app.listen(port, () => {
+  server.listen(port, () => {
     // console.log(`Server listening on http://localhost:${port}`);
   });
 }
 
-module.exports = app;
+module.exports = { app, server, io };

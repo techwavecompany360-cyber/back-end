@@ -10,6 +10,23 @@ const { body, validationResult, query } = require("express-validator");
 const users = require("../../lib/users");
 const rateLimit = require("express-rate-limit");
 const { ObjectId } = require("mongodb");
+const axios = require("axios");
+
+const SMS_API = process.env.SMS_API_URL || "http://localhost:4001";
+const EMAIL_API = process.env.EMAIL_API_URL || "http://localhost:4003";
+
+function formatPhone(phone) {
+  if (!phone) return null;
+  let cleaned = phone.replace(/\s+/g, "").replace(/[^0-9+]/g, "");
+  if (cleaned.startsWith("0")) cleaned = "+255" + cleaned.slice(1);
+  if (cleaned.startsWith("255")) cleaned = "+" + cleaned;
+  if (!cleaned.startsWith("+")) cleaned = "+" + cleaned;
+  return cleaned;
+}
+
+function generateOTP() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
 
 const writeLimiter = rateLimit({ windowMs: 60 * 1000, max: 20 });
 
@@ -512,6 +529,8 @@ router.post(
       const finalPayload = req.body;
 
       // Validate required fields
+      const isHomestay = finalPayload.type && finalPayload.type.toLowerCase() === "homestay";
+
       const requiredFields = [
         "name",
         "description",
@@ -521,10 +540,6 @@ router.post(
         "frontImage",
         "otherImages",
         "reference",
-        "tinNumber",
-        "businessLicenseNumber",
-        "tinDocumentUrl",
-        "businessLicenseDocumentUrl",
         "mobileProvider",
         "bankName",
         "accountNumber",
@@ -532,6 +547,16 @@ router.post(
         "mobileNumber",
         "registerName",
       ];
+
+      // Business documents are only required for non-homestay types
+      if (!isHomestay) {
+        requiredFields.push(
+          "tinNumber",
+          "businessLicenseNumber",
+          "tinDocumentUrl",
+          "businessLicenseDocumentUrl",
+        );
+      }
 
       const missingFields = requiredFields.filter(
         (field) => !finalPayload[field],
@@ -543,25 +568,27 @@ router.post(
         });
       }
 
-      // Validate document URLs are provided
-      if (
-        !finalPayload.tinDocumentUrl ||
-        !finalPayload.businessLicenseDocumentUrl
-      ) {
-        return res.status(400).json({
-          message: "Document URLs are required",
-        });
-      }
+      // Validate document URLs for non-homestay types
+      if (!isHomestay) {
+        if (
+          !finalPayload.tinDocumentUrl ||
+          !finalPayload.businessLicenseDocumentUrl
+        ) {
+          return res.status(400).json({
+            message: "Document URLs are required",
+          });
+        }
 
-      // Validate URLs point to PDF documents (basic check)
-      const pdfUrlPattern = /\.(pdf)$/i;
-      if (
-        !pdfUrlPattern.test(finalPayload.tinDocumentUrl) ||
-        !pdfUrlPattern.test(finalPayload.businessLicenseDocumentUrl)
-      ) {
-        return res.status(400).json({
-          message: "Document URLs must point to valid PDF files",
-        });
+        // Validate URLs point to PDF documents (basic check)
+        const pdfUrlPattern = /\.(pdf)$/i;
+        if (
+          !pdfUrlPattern.test(finalPayload.tinDocumentUrl) ||
+          !pdfUrlPattern.test(finalPayload.businessLicenseDocumentUrl)
+        ) {
+          return res.status(400).json({
+            message: "Document URLs must point to valid PDF files",
+          });
+        }
       }
 
       // Validate wallet structure
@@ -613,12 +640,21 @@ router.post(
         registerName: finalPayload.registerName,
         // Wallet
         wallet,
+        // House rules and Addons
+        houseRules: finalPayload.houseRules,
+        addons: finalPayload.addons || [],
+        
+        // Advanced Homestay & Checking Features
+        checkInMethod: finalPayload.checkInMethod,
+        checkInInstructions: finalPayload.checkInInstructions,
+        digitalGuidebook: finalPayload.digitalGuidebook,
+
         // Homestay specifics
         ...(finalPayload.type && finalPayload.type.toLowerCase() === "homestay" && {
           hostBio: finalPayload.hostBio,
           languagesSpoken: finalPayload.languagesSpoken,
-          houseRules: finalPayload.houseRules,
           interactionLevel: finalPayload.interactionLevel,
+          neighborhoodGuide: finalPayload.neighborhoodGuide,
         }),
         // Metadata
         adminApproval: false,
@@ -630,18 +666,20 @@ router.post(
       };
 
       // Store in database
-      const col = await mongo.getCollection("accommodations");
+      const col = await mongo.getCollection("accomodations");
       const result = await col.insertOne(accommodationRecord);
 
       // Virtual Room integration for Homestays
       if (finalPayload.type && finalPayload.type.toLowerCase() === "homestay") {
         const roomsCol = await mongo.getCollection("rooms");
         await roomsCol.insertOne({
-          roomName: "Entire Home",
+          roomName: finalPayload.spaceType || "Entire Home",
           accomodationReference: result.insertedId.toString(),
-          description: "Exclusive use of the entire homestay.",
+          description: `Exclusive use of the ${finalPayload.spaceType || "Entire Home"}.`,
           capacity: Number(finalPayload.maxGuests) || 1,
           price: Number(finalPayload.pricePerNight) || 0,
+          cleaningFee: Number(finalPayload.cleaningFee) || 0,
+          securityDeposit: Number(finalPayload.securityDeposit) || 0,
           amenities: finalPayload.amenities,
           otherImagesCount:
             finalPayload.otherImagesCount || finalPayload.otherImages.length,
@@ -876,6 +914,101 @@ router.get("/owner/accomodations", requireAuth, async (req, res, next) => {
   }
 });
 
+// Update accommodation coordinates
+router.put(
+  "/accomodation/coordinates",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const { accommodationId, latitude, longitude } = req.body;
+      if (!accommodationId || latitude == null || longitude == null) {
+        return res
+          .status(400)
+          .json({ error: "accommodationId, latitude and longitude are required" });
+      }
+
+      const col = await mongo.getCollection("accomodations");
+      const acc = await col.findOne({ _id: new ObjectId(accommodationId) });
+      if (!acc) {
+        return res.status(404).json({ error: "Accommodation not found" });
+      }
+
+      // Verify ownership
+      if (acc.reference !== req.user.reference && req.user.role !== "admin") {
+        return res.status(403).json({ error: "You do not own this accommodation" });
+      }
+
+      // Update coordinates — store both at top-level and inside location object
+      const updateFields = {
+        latitude: parseFloat(latitude),
+        longitude: parseFloat(longitude),
+      };
+
+      // Also update inside the location object if it exists
+      const locationUpdate = {};
+      if (acc.location && typeof acc.location === "object") {
+        locationUpdate["location.latitude"] = parseFloat(latitude);
+        locationUpdate["location.longitude"] = parseFloat(longitude);
+      }
+
+      await col.updateOne(
+        { _id: new ObjectId(accommodationId) },
+        { $set: { ...updateFields, ...locationUpdate } }
+      );
+
+      res.status(200).json({
+        status: "success",
+        message: "Coordinates updated successfully",
+        latitude: parseFloat(latitude),
+        longitude: parseFloat(longitude),
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Update accommodation check-in/out times
+router.put(
+  "/accomodation/times",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const { accommodationId, checkInTime, checkOutTime } = req.body;
+      if (!accommodationId || !checkInTime || !checkOutTime) {
+        return res
+          .status(400)
+          .json({ error: "accommodationId, checkInTime, and checkOutTime are required" });
+      }
+
+      const col = await mongo.getCollection("accomodations");
+      const acc = await col.findOne({ _id: new ObjectId(accommodationId) });
+      if (!acc) {
+        return res.status(404).json({ error: "Accommodation not found" });
+      }
+
+      // Verify ownership
+      if (acc.reference !== req.user.reference && req.user.role !== "admin") {
+        return res.status(403).json({ error: "You do not own this accommodation" });
+      }
+
+      await col.updateOne(
+        { _id: new ObjectId(accommodationId) },
+        { $set: { checkInTime, checkOutTime } }
+      );
+
+      res.status(200).json({
+        status: "success",
+        message: "Times updated successfully",
+        checkInTime,
+        checkOutTime,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 router.post(
   "/accomodations/rooms",
   writeLimiter,
@@ -1076,7 +1209,18 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
       (parseInt(bookingData.nights) || 1);
     const configCol = await mongo.getCollection("system_config");
     const feeConfig = await configCol.findOne({ _id: "platform_fees" });
-    const platformFeeRate = feeConfig?.managementFeeRate ?? 0.01; // default 1%
+    
+    let platformFeeRate = feeConfig?.managementFeeRate ?? 0.01; // default 1%
+    
+    // Check for accommodation-specific custom fee
+    const accId = bookingData.accommodationId || bookingData.accomodationId;
+    if (accId && feeConfig?.customRates && Array.isArray(feeConfig.customRates)) {
+      const custom = feeConfig.customRates.find(c => c.accommodationId === accId);
+      if (custom && typeof custom.managementFeeRate === 'number') {
+        platformFeeRate = custom.managementFeeRate;
+      }
+    }
+
     const platformFee = totalBookingAmount * platformFeeRate;
     const hostShare = totalBookingAmount - platformFee;
 
@@ -1095,6 +1239,8 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
       platformFeeRate,
       hostShare,
       walletAction: "debit",
+      createdBy: req.user._id,
+      creatorName: req.user.name,
       createdAt: new Date(),
     });
 
@@ -1976,6 +2122,137 @@ router.get("/analytics/summary", requireAuth, async (req, res, next) => {
   }
 });
 
+router.get("/analytics/advanced", requireAuth, async (req, res, next) => {
+  try {
+    const analyticsCol = await mongo.getCollection("site_analytics");
+    const bookingsCol = await mongo.getCollection("bookings");
+    const accomodationsCol = await mongo.getCollection("accomodations");
+
+    const accommodationId = req.query.accommodationId;
+    const startDateRaw = req.query.startDate;
+    const endDateRaw = req.query.endDate;
+
+    const userRole = req.user && req.user.role ? req.user.role.toLowerCase() : "";
+    const isOwner = userRole === "manager" || userRole === "owner";
+    const userReference = isOwner ? req.user.reference : null;
+
+    let dateMatch = {};
+    if (startDateRaw || endDateRaw) {
+      dateMatch.createdAt = {};
+      if (startDateRaw) dateMatch.createdAt.$gte = new Date(startDateRaw);
+      if (endDateRaw) {
+        const d = new Date(endDateRaw);
+        d.setUTCHours(23, 59, 59, 999);
+        dateMatch.createdAt.$lte = d;
+      }
+    }
+
+    let matchQuery = { ...dateMatch };
+
+    if (accommodationId) {
+      const { ObjectId } = require("mongodb");
+      if (ObjectId.isValid(accommodationId)) {
+        matchQuery["eventMeta.propertyId"] = { $in: [accommodationId, new ObjectId(accommodationId), String(accommodationId)] };
+      } else {
+        matchQuery["eventMeta.propertyId"] = String(accommodationId);
+      }
+    } else if (userReference) {
+      const matchedAccs = await accomodationsCol.find({ reference: userReference }, { projection: { _id: 1, id: 1 } }).toArray();
+      const validAccIds = matchedAccs.map(a => a._id.toString()).concat(matchedAccs.map(a => a.id).filter(id => id != null).map(String));
+      
+      if (validAccIds.length > 0) {
+        matchQuery["eventMeta.propertyId"] = { $in: validAccIds };
+      } else {
+        matchQuery["eventMeta.propertyId"] = "impossible_match";
+      }
+    }
+
+    const events = await analyticsCol.find(matchQuery).toArray();
+
+    let totalPageViews = 0;
+    let totalSearches = 0;
+    let totalPropertyViews = 0;
+
+    const deviceTypes = { mobile: 0, desktop: 0, tablet: 0 };
+    const browsers = {};
+    const sources = {};
+    const countries = {};
+    const cities = {};
+    
+    const mapClusters = {};
+
+    events.forEach(e => {
+        if (e.eventType === 'pageview') totalPageViews++;
+        else if (e.eventType === 'search') totalSearches++;
+        else if (e.eventType === 'view_property') totalPropertyViews++;
+
+        if (e.device && e.device.deviceType) {
+            deviceTypes[e.device.deviceType] = (deviceTypes[e.device.deviceType] || 0) + 1;
+        }
+        if (e.device && e.device.browser) {
+            browsers[e.device.browser] = (browsers[e.device.browser] || 0) + 1;
+        }
+
+        const rawSource = e.utmSource || e.referrer || 'Direct';
+        let cleanSource = rawSource;
+        if (rawSource.startsWith('http')) {
+            try { cleanSource = new URL(rawSource).hostname } catch(err){}
+        }
+        // Normalize
+        if (cleanSource === 'Direct' || cleanSource === '') cleanSource = 'Direct';
+        if (cleanSource.includes('google')) cleanSource = 'Google';
+        if (cleanSource.includes('facebook')) cleanSource = 'Facebook';
+        if (cleanSource.includes('instagram')) cleanSource = 'Instagram';
+        
+        sources[cleanSource] = (sources[cleanSource] || 0) + 1;
+
+        if (e.geo) {
+            if (e.geo.country) countries[e.geo.country] = (countries[e.geo.country] || 0) + 1;
+            if (e.geo.city) cities[e.geo.city] = (cities[e.geo.city] || 0) + 1;
+            if (e.geo.ll && e.geo.ll.length === 2) {
+                const key = `${e.geo.ll[0].toFixed(2)},${e.geo.ll[1].toFixed(2)}`; // cluster nearby
+                if (!mapClusters[key]) {
+                    mapClusters[key] = { lat: e.geo.ll[0], lng: e.geo.ll[1], count: 0, city: e.geo.city, country: e.geo.country };
+                }
+                mapClusters[key].count++;
+            }
+        }
+    });
+
+    // Bookings count for the funnel
+    let bookingMatch = { ...dateMatch };
+    if (accommodationId) {
+        const { ObjectId } = require("mongodb");
+        if (ObjectId.isValid(accommodationId)) {
+            bookingMatch.accomodationId = { $in: [accommodationId, new ObjectId(accommodationId)] };
+        } else {
+            bookingMatch.accomodationId = accommodationId;
+        }
+    }
+    const totalBookings = await bookingsCol.countDocuments(bookingMatch);
+
+    res.json({
+        status: "success",
+        funnel: {
+            pageViews: totalPageViews,
+            searches: totalSearches,
+            propertyViews: totalPropertyViews,
+            bookings: totalBookings
+        },
+        devices: deviceTypes,
+        browsers: Object.keys(browsers).map(k => ({ label: k, count: browsers[k] })).sort((a,b)=>b.count - a.count).slice(0, 5),
+        sources: Object.keys(sources).map(k => ({ label: k, count: sources[k] })).sort((a,b)=>b.count - a.count).slice(0, 10),
+        locations: {
+            countries: Object.keys(countries).map(k => ({ label: k, count: countries[k] })).sort((a,b)=>b.count - a.count).slice(0, 10),
+            cities: Object.keys(cities).map(k => ({ label: k, count: cities[k] })).sort((a,b)=>b.count - a.count).slice(0, 10)
+        },
+        mapData: Object.values(mapClusters)
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/wallet/transactions", requireAuth, async (req, res, next) => {
   try {
     const accommodationId =
@@ -2212,6 +2489,40 @@ router.post("/login", async (req, res, next) => {
       return res
         .status(401)
         .json({ error: "The email or password you entered is incorrect." });
+    if (admin.preferences?.twoFactorEnabled) {
+      // ── 2FA is Enabled ──
+      const otp = generateOTP()
+      const otpCol = await mongo.getCollection("otp_store")
+      await otpCol.deleteMany({ userId: admin._id.toString(), type: "2fa_login_manager" })
+      await otpCol.insertOne({
+        userId: admin._id.toString(),
+        type: "2fa_login_manager",
+        otp,
+        expiresAt: new Date(Date.now() + 10 * 60000), // 10 mins
+        attempts: 0
+      })
+
+      // Send OTP via email or SMS (prefer email if available, else SMS)
+      if (admin.email) {
+        axios.post(`${EMAIL_API}/api/email/otp`, {
+          to: admin.email,
+          name: admin.username || admin.fullName || "Manager",
+          otp
+        }, { timeout: 5000 }).catch(e => console.warn("Manager 2FA email failed:", e.message))
+      } else if (admin.phone) {
+        axios.post(`${SMS_API}/api/sms/send`, {
+          phone: admin.phone,
+          message: `Your ReM360 Management login code is ${otp}. Valid for 10 minutes.`
+        }, { timeout: 5000 }).catch(e => console.warn("Manager 2FA SMS failed:", e.message))
+      }
+
+      return res.json({
+        status: "2fa_required",
+        message: "Two-Factor Authentication required. We have sent an OTP to your email/phone.",
+        identifier: admin.email || admin.phone
+      })
+    }
+
     const token = sign({
       email: admin.email,
       id: admin._id ? admin._id.toString() : admin.id,
@@ -2220,6 +2531,7 @@ router.post("/login", async (req, res, next) => {
     });
     const { passwordHash, ...safe } = admin;
     res.json({
+      status: "success",
       token,
       user: { ...safe },
     });
@@ -2227,6 +2539,241 @@ router.post("/login", async (req, res, next) => {
     next(err);
   }
 });
+
+// ══════════════════════════════════════
+// POST /management/login-verify
+// Verify 2FA OTP for management login
+// ══════════════════════════════════════
+router.post("/login-verify", async (req, res, next) => {
+  try {
+    const { identifier, otp } = req.body;
+    if (!identifier || !otp) {
+      return res.status(400).json({ error: "Identifier and OTP are required." });
+    }
+
+    const col = await mongo.getCollection("management");
+    const admin = await col.findOne({ email: identifier });
+
+    if (!admin) return res.status(404).json({ error: "User not found." });
+
+    const otpCol = await mongo.getCollection("otp_store");
+    const stored = await otpCol.findOne({ userId: admin._id.toString(), type: "2fa_login_manager" });
+
+    if (!stored) {
+      return res.status(404).json({ error: "No 2FA OTP found. Please try logging in again." });
+    }
+
+    if (new Date() > stored.expiresAt) {
+      await otpCol.deleteOne({ _id: stored._id });
+      return res.status(410).json({ error: "OTP has expired. Please try logging in again." });
+    }
+
+    if (stored.attempts >= 5) {
+      await otpCol.deleteOne({ _id: stored._id });
+      return res.status(429).json({ error: "Too many failed attempts. Please try logging in again." });
+    }
+
+    if (stored.otp !== otp.trim()) {
+      await otpCol.updateOne({ _id: stored._id }, { $inc: { attempts: 1 } });
+      return res.status(401).json({
+        error: "Invalid OTP.",
+        attemptsRemaining: 5 - (stored.attempts + 1),
+      });
+    }
+
+    // Success!
+    await otpCol.deleteOne({ _id: stored._id });
+
+    const token = sign({
+      email: admin.email,
+      id: admin._id ? admin._id.toString() : admin.id,
+      role: admin.role || "manager",
+      reference: admin.owner ? admin._id.toString() : admin.reference,
+    });
+    const { passwordHash, ...safe } = admin;
+    res.json({
+      status: "success",
+      token,
+      user: { ...safe },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ══════════════════════════════════════
+// POST /management/forgot-password
+// Send OTP for password reset
+// ══════════════════════════════════════
+router.post("/forgot-password", async (req, res, next) => {
+  try {
+    const { identifier } = req.body;
+
+    if (!identifier) {
+      return res.status(400).json({ error: "Email or phone number is required." });
+    }
+
+    const col = await mongo.getCollection("management");
+    const trimmed = identifier.trim().toLowerCase();
+
+    let user = null;
+    let resetType = null;
+
+    if (trimmed.includes("@")) {
+      user = await col.findOne({ email: trimmed });
+      resetType = "email";
+    } else {
+      const formattedPhone = formatPhone(trimmed);
+      if (formattedPhone) {
+        user = await col.findOne({ phone: formattedPhone });
+      }
+      if (!user) {
+        user = await col.findOne({ phone: trimmed });
+      }
+      resetType = "phone";
+    }
+
+    if (!user) {
+      return res.json({ status: "success", message: "If an account exists, an OTP has been sent.", type: resetType });
+    }
+
+    const otp = generateOTP();
+
+    if (resetType === "email" && user.email) {
+      const otpCol = await mongo.getCollection("otp_store");
+      await otpCol.deleteMany({ userId: user._id.toString(), type: "management_password_reset" });
+      await otpCol.insertOne({
+        userId: user._id.toString(),
+        type: "management_password_reset",
+        otp,
+        identifier: user.email,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+        attempts: 0,
+        createdAt: new Date(),
+      });
+
+      axios.post(`${EMAIL_API}/api/email/password-reset`, {
+        to: user.email,
+        name: user.name,
+        resetCode: otp,
+      }, { timeout: 10000 }).catch(err => {
+        console.warn("Password reset email failed:", err.message);
+      });
+
+      res.json({
+        status: "success",
+        message: "Password reset OTP sent to your email.",
+        type: "email",
+      });
+
+    } else if (resetType === "phone" && user.phone) {
+      const otpCol = await mongo.getCollection("otp_store");
+      await otpCol.deleteMany({ userId: user._id.toString(), type: "management_password_reset" });
+      await otpCol.insertOne({
+        userId: user._id.toString(),
+        type: "management_password_reset",
+        otp,
+        identifier: user.phone,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        attempts: 0,
+        createdAt: new Date(),
+      });
+
+      axios.post(`${SMS_API}/api/sms/send`, {
+        phone: user.phone,
+        message: `Your ReM360 Management password reset code is: ${otp}. This code expires in 10 minutes.`,
+      }, { timeout: 10000 }).catch(err => {
+        console.warn("Password reset SMS failed:", err.message);
+      });
+
+      res.json({
+        status: "success",
+        message: "Password reset OTP sent to your phone.",
+        type: "phone",
+      });
+    } else {
+      res.json({ status: "success", message: "If an account exists, an OTP has been sent.", type: resetType });
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ══════════════════════════════════════
+// POST /management/reset-password
+// Verify OTP and set new password
+// ══════════════════════════════════════
+router.post("/reset-password", async (req, res, next) => {
+  try {
+    const { identifier, otp, newPassword } = req.body;
+
+    if (!identifier || !otp || !newPassword) {
+      return res.status(400).json({ error: "Identifier, OTP, and new password are required." });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "New password must be at least 6 characters." });
+    }
+
+    const col = await mongo.getCollection("management");
+    const trimmed = identifier.trim().toLowerCase();
+
+    let user = null;
+    if (trimmed.includes("@")) {
+      user = await col.findOne({ email: trimmed });
+    } else {
+      const formattedPhone = formatPhone(trimmed);
+      if (formattedPhone) {
+        user = await col.findOne({ phone: formattedPhone });
+      }
+      if (!user) {
+        user = await col.findOne({ phone: trimmed });
+      }
+    }
+
+    if (!user) {
+      return res.status(404).json({ error: "Account not found." });
+    }
+
+    const otpCol = await mongo.getCollection("otp_store");
+    const stored = await otpCol.findOne({ userId: user._id.toString(), type: "management_password_reset" });
+
+    if (!stored) {
+      return res.status(404).json({ error: "No reset OTP found. Please request a new one." });
+    }
+
+    if (new Date() > stored.expiresAt) {
+      await otpCol.deleteOne({ _id: stored._id });
+      return res.status(410).json({ error: "OTP has expired. Please request a new one." });
+    }
+
+    if (stored.attempts >= 5) {
+      await otpCol.deleteOne({ _id: stored._id });
+      return res.status(429).json({ error: "Too many failed attempts. Please request a new OTP." });
+    }
+
+    if (stored.otp !== otp.trim()) {
+      await otpCol.updateOne({ _id: stored._id }, { $inc: { attempts: 1 } });
+      return res.status(401).json({
+        error: "Invalid OTP.",
+        attemptsRemaining: 5 - (stored.attempts + 1),
+      });
+    }
+
+    await otpCol.deleteOne({ _id: stored._id });
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(newPassword, salt);
+
+    await col.updateOne(
+      { _id: user._id },
+      { $set: { passwordHash, updatedAt: new Date() } }
+    );
+
+    res.json({ status: "success", message: "Password reset successfully. You can now login." });
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // POST /management/users (create) - admin only
 router.post(
@@ -2780,5 +3327,459 @@ router.post(
     }
   }
 );
+
+// ══════════════════════════════════════
+// PUT /management/profile
+// Update manager profile (preferences, etc)
+// ══════════════════════════════════════
+router.put("/profile", requireAuth, async (req, res, next) => {
+  try {
+    const { preferences } = req.body;
+    const col = await mongo.getCollection("management");
+    
+    const updateDoc = { $set: { updatedAt: new Date() } };
+    if (preferences) updateDoc.$set.preferences = preferences;
+
+    await col.updateOne(
+      { _id: new ObjectId(req.user.id) },
+      updateDoc
+    );
+
+    const user = await col.findOne({ _id: new ObjectId(req.user.id) });
+    const { passwordHash, ...safeUser } = user;
+
+    res.json({ status: "success", user: { ...safeUser, id: safeUser._id.toString() } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ══════════════════════════════════════
+// POST /management/avatar
+// Upload manager profile avatar
+// ══════════════════════════════════════
+router.post("/avatar", requireAuth, upload.single("avatar"), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No image file provided." });
+    }
+
+    const avatarUrl = `/uploads/images/${req.file.filename}`;
+    const col = await mongo.getCollection("management");
+
+    await col.updateOne(
+      { _id: new ObjectId(req.user.id) },
+      { $set: { avatarUrl, updatedAt: new Date() } }
+    );
+
+    res.json({ status: "success", avatarUrl });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// PHOTO MANAGEMENT & CONTENT EDITING (Manager Self-Service)
+// ══════════════════════════════════════════════════════════════
+
+// ──────── Upload Photos (Accommodation) → pendingImages (requires admin approval) ────────
+router.post(
+  "/accomodation/:id/upload-photos",
+  requireAuth,
+  upload.array("images", 10),
+  async (req, res, next) => {
+    try {
+      const accId = req.params.id;
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: "No images provided" });
+      }
+
+      const col = await mongo.getCollection("accomodations");
+      const acc = await col.findOne({ _id: new ObjectId(accId) });
+      if (!acc) return res.status(404).json({ error: "Accommodation not found" });
+
+      const pendingEntries = req.files.map((file) => ({
+        url: getLocalImageUrl(file.filename),
+        originalName: file.originalname,
+        uploadedAt: new Date(),
+        uploadedBy: req.user?.email || req.user?.name || "manager",
+      }));
+
+      await col.updateOne(
+        { _id: new ObjectId(accId) },
+        { $push: { pendingImages: { $each: pendingEntries } } }
+      );
+
+      res.status(201).json({
+        status: "success",
+        message: `${pendingEntries.length} photo(s) uploaded and awaiting admin approval`,
+        pendingImages: pendingEntries,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ──────── Upload Photos (Room) → pendingImages (requires admin approval) ────────
+router.post(
+  "/room/:id/upload-photos",
+  requireAuth,
+  upload.array("images", 10),
+  async (req, res, next) => {
+    try {
+      const roomId = req.params.id;
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: "No images provided" });
+      }
+
+      const col = await mongo.getCollection("rooms");
+      const room = await col.findOne({ _id: new ObjectId(roomId) });
+      if (!room) return res.status(404).json({ error: "Room not found" });
+
+      const pendingEntries = req.files.map((file) => ({
+        url: getLocalImageUrl(file.filename),
+        originalName: file.originalname,
+        uploadedAt: new Date(),
+        uploadedBy: req.user?.email || req.user?.name || "manager",
+      }));
+
+      await col.updateOne(
+        { _id: new ObjectId(roomId) },
+        { $push: { pendingImages: { $each: pendingEntries } } }
+      );
+
+      res.status(201).json({
+        status: "success",
+        message: `${pendingEntries.length} photo(s) uploaded and awaiting admin approval`,
+        pendingImages: pendingEntries,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ──────── Delete Photo (Accommodation) — No admin approval needed ────────
+router.delete(
+  "/accomodation/:id/delete-photo",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const accId = req.params.id;
+      const { imageUrl } = req.body;
+      if (!imageUrl) return res.status(400).json({ error: "imageUrl is required" });
+
+      const col = await mongo.getCollection("accomodations");
+      const acc = await col.findOne({ _id: new ObjectId(accId) });
+      if (!acc) return res.status(404).json({ error: "Accommodation not found" });
+
+      const updateFields = {};
+      let otherImages = Array.isArray(acc.otherImages) ? [...acc.otherImages] : [];
+
+      if (acc.frontImage === imageUrl) {
+        // Deleting front image → promote first otherImage
+        updateFields.frontImage = otherImages.length > 0 ? otherImages.shift() : null;
+        updateFields.otherImages = otherImages;
+      } else {
+        const idx = otherImages.indexOf(imageUrl);
+        if (idx === -1) return res.status(404).json({ error: "Image not found in accommodation photos" });
+        otherImages.splice(idx, 1);
+        updateFields.otherImages = otherImages;
+      }
+
+      await col.updateOne({ _id: new ObjectId(accId) }, { $set: updateFields });
+
+      // Try deleting the file from disk
+      try {
+        const filename = imageUrl.split("/").pop();
+        const filePath = path.join(__dirname, "../../public/uploads/images", filename);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch (e) {
+        console.warn("Could not delete file from disk:", e.message);
+      }
+
+      res.json({
+        status: "success",
+        message: "Photo deleted successfully",
+        frontImage: updateFields.frontImage !== undefined ? updateFields.frontImage : acc.frontImage,
+        otherImages: updateFields.otherImages || otherImages,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ──────── Delete Photo (Room) — No admin approval needed ────────
+router.delete(
+  "/room/:id/delete-photo",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const roomId = req.params.id;
+      const { imageUrl } = req.body;
+      if (!imageUrl) return res.status(400).json({ error: "imageUrl is required" });
+
+      const col = await mongo.getCollection("rooms");
+      const room = await col.findOne({ _id: new ObjectId(roomId) });
+      if (!room) return res.status(404).json({ error: "Room not found" });
+
+      const updateFields = {};
+      let otherImages = Array.isArray(room.otherImages) ? [...room.otherImages] : [];
+
+      if (room.frontImage === imageUrl) {
+        updateFields.frontImage = otherImages.length > 0 ? otherImages.shift() : null;
+        updateFields.otherImages = otherImages;
+      } else {
+        const idx = otherImages.indexOf(imageUrl);
+        if (idx === -1) return res.status(404).json({ error: "Image not found in room photos" });
+        otherImages.splice(idx, 1);
+        updateFields.otherImages = otherImages;
+      }
+
+      await col.updateOne({ _id: new ObjectId(roomId) }, { $set: updateFields });
+
+      // Try deleting the file from disk
+      try {
+        const filename = imageUrl.split("/").pop();
+        const filePath = path.join(__dirname, "../../public/uploads/images", filename);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch (e) {
+        console.warn("Could not delete file from disk:", e.message);
+      }
+
+      res.json({
+        status: "success",
+        message: "Photo deleted successfully",
+        frontImage: updateFields.frontImage !== undefined ? updateFields.frontImage : room.frontImage,
+        otherImages: updateFields.otherImages || otherImages,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ──────── Edit Accommodation Details — No admin approval needed ────────
+router.put(
+  "/accomodation/:id/edit-details",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      if (req.user.role !== "manager") {
+        return res.status(403).json({ error: "Only managers can edit accommodation details." });
+      }
+      const accId = req.params.id;
+      const { name, description, amenities } = req.body;
+
+      const col = await mongo.getCollection("accomodations");
+      const acc = await col.findOne({ _id: new ObjectId(accId) });
+      if (!acc) return res.status(404).json({ error: "Accommodation not found" });
+
+      const updateFields = { updatedAt: new Date() };
+      if (name !== undefined && name.trim()) updateFields.name = name.trim();
+      if (description !== undefined) updateFields.description = description;
+      if (amenities !== undefined && Array.isArray(amenities)) updateFields.amenities = amenities;
+
+      await col.updateOne({ _id: new ObjectId(accId) }, { $set: updateFields });
+
+      const updated = await col.findOne({ _id: new ObjectId(accId) });
+      res.json({
+        status: "success",
+        message: "Accommodation details updated successfully",
+        accommodation: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ──────── Edit Room Details — No admin approval needed ────────
+router.put(
+  "/room/:id/edit-details",
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      if (req.user.role !== "manager") {
+        return res.status(403).json({ error: "Only managers can edit room details." });
+      }
+      const roomId = req.params.id;
+      const { roomName, description, amenities, capacity, tieredPrices } = req.body;
+
+      const col = await mongo.getCollection("rooms");
+      const room = await col.findOne({ _id: new ObjectId(roomId) });
+      if (!room) return res.status(404).json({ error: "Room not found" });
+
+      const updateFields = { updatedAt: new Date() };
+      if (roomName !== undefined && roomName.trim()) updateFields.roomName = roomName.trim();
+      if (description !== undefined) updateFields.description = description;
+      if (amenities !== undefined && Array.isArray(amenities)) updateFields.amenities = amenities;
+      if (capacity !== undefined) updateFields.capacity = parseInt(capacity) || 0;
+      if (tieredPrices !== undefined) updateFields.tieredPrices = tieredPrices;
+
+      await col.updateOne({ _id: new ObjectId(roomId) }, { $set: updateFields });
+
+      const updated = await col.findOne({ _id: new ObjectId(roomId) });
+      res.json({
+        status: "success",
+        message: "Room details updated successfully",
+        room: updated,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════
+// PROMO CODES
+// ══════════════════════════════════════════════════════════════
+router.get("/promo-codes", requireAuth, async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("promo_codes");
+    let filter = {};
+    if (req.user.role !== "Admin") {
+       filter = { createdBy: req.user.email };
+    }
+    const codes = await col.find(filter).sort({ createdAt: -1 }).toArray();
+    res.json({ status: "success", promoCodes: codes });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/promo-codes", writeLimiter, requireAuth, async (req, res, next) => {
+  try {
+    const { code, discountType, discountValue, validFrom, validTo, maxUses, accommodationId } = req.body;
+    if (!code || !discountType || !discountValue) {
+      return res.status(400).json({ error: "Code, discount type, and value are required" });
+    }
+    
+    const col = await mongo.getCollection("promo_codes");
+    const existing = await col.findOne({ code: code.toUpperCase() });
+    if (existing) {
+      return res.status(409).json({ error: "Promo code already exists" });
+    }
+
+    const doc = {
+      code: code.toUpperCase(),
+      discountType, // 'percentage' or 'fixed'
+      discountValue: Number(discountValue),
+      validFrom: validFrom ? new Date(validFrom) : new Date(),
+      validTo: validTo ? new Date(validTo) : null,
+      maxUses: maxUses ? Number(maxUses) : null,
+      usedCount: 0,
+      accommodationId: accommodationId || null,
+      status: "active",
+      createdBy: req.user.email,
+      createdAt: new Date()
+    };
+
+    await col.insertOne(doc);
+    res.status(201).json({ status: "success", promoCode: doc });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/promo-codes/:id/status", requireAuth, async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    const col = await mongo.getCollection("promo_codes");
+    await col.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { status, updatedAt: new Date() } });
+    res.json({ status: "success", message: "Status updated" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/promo-codes/:id", requireAuth, async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("promo_codes");
+    await col.deleteOne({ _id: new ObjectId(req.params.id) });
+    res.json({ status: "success", message: "Promo code deleted" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// HOUSEKEEPING
+// ══════════════════════════════════════════════════════════════
+router.get("/housekeeping", requireAuth, async (req, res, next) => {
+  try {
+    const { accommodationId } = req.query;
+    let matchQuery = {};
+    if (accommodationId) {
+      matchQuery.accomodationReference = accommodationId;
+    }
+    const col = await mongo.getCollection("rooms");
+    const rooms = await col.find(matchQuery).toArray();
+    
+    const bookingsCol = await mongo.getCollection("bookings");
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const activeBookings = await bookingsCol.find({
+      roomId: { $in: rooms.map(r => r._id.toString()) },
+      status: { $nin: ["Cancelled", "cancelled"] }
+    }).toArray();
+
+    const enrichedRooms = rooms.map(room => {
+      const roomBookings = activeBookings.filter(b => b.roomId === room._id.toString());
+      
+      const checkInToday = roomBookings.find(b => {
+        const ci = new Date(b.checkIn);
+        return ci >= today && ci < tomorrow;
+      });
+      
+      const checkOutToday = roomBookings.find(b => {
+        const co = new Date(b.checkOut);
+        return co >= today && co < tomorrow;
+      });
+
+      const currentlyOccupied = roomBookings.find(b => {
+        const ci = new Date(b.checkIn);
+        const co = new Date(b.checkOut);
+        const now = new Date();
+        return ci <= now && co >= now && b.status !== 'Checked-Out';
+      });
+
+      return {
+        ...room,
+        housekeepingStatus: room.housekeepingStatus || 'Clean',
+        checkInToday: !!checkInToday,
+        checkOutToday: !!checkOutToday,
+        isOccupied: !!currentlyOccupied,
+        currentBooking: currentlyOccupied || checkInToday || null
+      };
+    });
+
+    res.json({ status: "success", rooms: enrichedRooms });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/housekeeping/:id", requireAuth, async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ['Clean', 'Dirty', 'Cleaning in Progress', 'Maintenance'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+    const col = await mongo.getCollection("rooms");
+    await col.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { housekeepingStatus: status, housekeepingUpdatedAt: new Date() } });
+    res.json({ status: "success", message: "Status updated" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.use("/chat", require("./chat"));
 
 module.exports = router;
