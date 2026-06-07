@@ -95,7 +95,6 @@ router.post("/bookings", async (req, res, next) => {
     const parsedCheckIn = new Date(bookingData.checkIn);
     const parsedCheckOut = new Date(bookingData.checkOut);
 
-    // Check for overlapping bookings
     const overlappingBookings = await col
       .find({
         roomId: bookingData.roomId,
@@ -105,7 +104,17 @@ router.post("/bookings", async (req, res, next) => {
       })
       .toArray();
 
-    if (overlappingBookings.length > 0) {
+    // Enforce "Booked Online" (external blocks) constraint
+    const externalBlocksCol = await mongo.getCollection("external_blocks");
+    const overlappingBlocks = await externalBlocksCol
+      .find({
+        roomId: bookingData.roomId,
+        checkIn: { $lt: parsedCheckOut },
+        checkOut: { $gt: parsedCheckIn },
+      })
+      .toArray();
+
+    if (overlappingBookings.length > 0 || overlappingBlocks.length > 0) {
       return res.status(409).json({
         error: "Booking conflict: The selected dates are already booked for this room",
       });
@@ -528,10 +537,84 @@ router.get("/accomodations", async (req, res, next) => {
                 },
               },
               {
+                $lookup: {
+                  from: "external_blocks",
+                  let: { roomId: { $toString: "$_id" } },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: ["$roomId", "$$roomId"],
+                        },
+                      },
+                    },
+                    {
+                      $addFields: {
+                        checkInDate: {
+                          $cond: {
+                            if: { $eq: [{ $type: "$checkIn" }, "date"] },
+                            then: "$checkIn",
+                            else: { $dateFromString: { dateString: { $toString: "$checkIn" } } }
+                          }
+                        },
+                        checkOutDate: {
+                          $cond: {
+                            if: { $eq: [{ $type: "$checkOut" }, "date"] },
+                            then: "$checkOut",
+                            else: { $dateFromString: { dateString: { $toString: "$checkOut" } } }
+                          }
+                        },
+                      },
+                    },
+                    {
+                      $addFields: {
+                        daysDifference: {
+                          $divide: [
+                            { $subtract: ["$checkOutDate", "$checkInDate"] },
+                            86400000,
+                          ],
+                        },
+                      },
+                    },
+                    {
+                      $addFields: {
+                        dateRange: {
+                          $map: {
+                            input: {
+                              $range: [0, { $add: ["$daysDifference", 1] }],
+                            },
+                            as: "dayOffset",
+                            in: {
+                              $dateToString: {
+                                format: "%Y-%m-%d",
+                                date: {
+                                  $dateAdd: {
+                                    startDate: "$checkInDate",
+                                    unit: "day",
+                                    amount: "$$dayOffset",
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    {
+                      $project: {
+                        _id: 0,
+                        dates: "$dateRange",
+                      },
+                    },
+                  ],
+                  as: "externalBlocks",
+                },
+              },
+              {
                 $addFields: {
                   bookedDates: {
                     $reduce: {
-                      input: "$bookings.dates",
+                      input: { $concatArrays: ["$bookings.dates", "$externalBlocks.dates"] },
                       initialValue: [],
                       in: { $setUnion: ["$$value", "$$this"] }
                     }
@@ -541,6 +624,7 @@ router.get("/accomodations", async (req, res, next) => {
               {
                 $project: {
                   bookings: 0,
+                  externalBlocks: 0,
                 },
               },
             ],

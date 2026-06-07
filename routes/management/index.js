@@ -49,7 +49,7 @@ const upload = multer({
       cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
     },
   }),
-  limits: { fileSize: 2000 * 1024 * 1024 }, // 10MB limit
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit
   fileFilter: (req, file, cb) => {
     const allowedMimes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
     if (allowedMimes.includes(file.mimetype)) {
@@ -546,6 +546,8 @@ router.post(
         "accountName",
         "mobileNumber",
         "registerName",
+        "contactPersonName",
+        "contactPersonPhone",
       ];
 
       // Business documents are only required for non-homestay types
@@ -626,6 +628,9 @@ router.post(
         adminApproval: false, // Always false for new accommodations
         reference: finalPayload.reference,
         isNew: true,
+        // Contact Person
+        contactPersonName: finalPayload.contactPersonName,
+        contactPersonPhone: finalPayload.contactPersonPhone,
         // Business verification documents
         tinNumber: finalPayload.tinNumber,
         businessLicenseNumber: finalPayload.businessLicenseNumber,
@@ -1196,7 +1201,17 @@ router.post("/bookings", writeLimiter, requireAuth, async (req, res, next) => {
       })
       .toArray();
 
-    if (overlappingBookings.length > 0) {
+    // Enforce "Booked Online" (external blocks) constraint
+    const externalBlocksCol = await mongo.getCollection("external_blocks");
+    const overlappingBlocks = await externalBlocksCol
+      .find({
+        roomId: bookingData.roomId,
+        checkIn: { $lt: parsedCheckOut },
+        checkOut: { $gt: parsedCheckIn },
+      })
+      .toArray();
+
+    if (overlappingBookings.length > 0 || overlappingBlocks.length > 0) {
       return res.status(409).json({
         error:
           "Booking conflict: The selected dates are already booked for this room",
@@ -3221,7 +3236,16 @@ router.get(
         })
         .toArray();
 
-      const available = overlappingBookings.length === 0;
+      const externalBlocksCol = await mongo.getCollection("external_blocks");
+      const overlappingBlocks = await externalBlocksCol
+        .find({
+          roomId: roomId,
+          checkIn: { $lt: new Date(checkOut) },
+          checkOut: { $gt: new Date(checkIn) },
+        })
+        .toArray();
+
+      const available = overlappingBookings.length === 0 && overlappingBlocks.length === 0;
       res.json({ available });
     } catch (error) {
       // console.error("Error checking availability:", error);
@@ -3571,7 +3595,7 @@ router.put(
         return res.status(403).json({ error: "Only managers can edit accommodation details." });
       }
       const accId = req.params.id;
-      const { name, description, amenities } = req.body;
+      const { name, description, amenities, contactPersonName, contactPersonPhone } = req.body;
 
       const col = await mongo.getCollection("accomodations");
       const acc = await col.findOne({ _id: new ObjectId(accId) });
@@ -3581,6 +3605,8 @@ router.put(
       if (name !== undefined && name.trim()) updateFields.name = name.trim();
       if (description !== undefined) updateFields.description = description;
       if (amenities !== undefined && Array.isArray(amenities)) updateFields.amenities = amenities;
+      if (contactPersonName !== undefined) updateFields.contactPersonName = contactPersonName.trim();
+      if (contactPersonPhone !== undefined) updateFields.contactPersonPhone = contactPersonPhone.trim();
 
       await col.updateOne({ _id: new ObjectId(accId) }, { $set: updateFields });
 
@@ -3780,6 +3806,49 @@ router.put("/housekeeping/:id", requireAuth, async (req, res, next) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+// EXTERNAL BOOKING BLOCKS  (indicator only – no revenue impact)
+// ══════════════════════════════════════════════════════════════
+
+// GET all blocks for an accommodation
+router.get("/accomodation/:id/external-blocks", requireAuth, async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("external_blocks");
+    const blocks = await col.find({ accommodationId: req.params.id }).toArray();
+    res.json({ status: "success", blocks });
+  } catch (err) { next(err); }
+});
+
+// POST create a block for a specific room
+router.post("/room/:roomId/external-block", requireAuth, async (req, res, next) => {
+  try {
+    const { checkIn, checkOut, label, accommodationId } = req.body;
+    if (!checkIn || !checkOut) return res.status(400).json({ error: "checkIn and checkOut are required" });
+    if (new Date(checkIn) >= new Date(checkOut)) return res.status(400).json({ error: "checkIn must be before checkOut" });
+    const col = await mongo.getCollection("external_blocks");
+    const result = await col.insertOne({
+      roomId: req.params.roomId,
+      accommodationId: accommodationId || null,
+      checkIn: new Date(checkIn),
+      checkOut: new Date(checkOut),
+      label: (label || "External Booking").toString().trim().slice(0, 80),
+      isExternal: true,
+      createdAt: new Date(),
+    });
+    res.json({ status: "success", blockId: result.insertedId });
+  } catch (err) { next(err); }
+});
+
+// DELETE remove a block by its id
+router.delete("/external-block/:blockId", requireAuth, async (req, res, next) => {
+  try {
+    const col = await mongo.getCollection("external_blocks");
+    await col.deleteOne({ _id: new ObjectId(req.params.blockId) });
+    res.json({ status: "success", message: "Block removed" });
+  } catch (err) { next(err); }
+});
+
 router.use("/chat", require("./chat"));
 
 module.exports = router;
+
